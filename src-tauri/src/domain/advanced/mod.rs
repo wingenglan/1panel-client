@@ -494,6 +494,30 @@ pub fn waf_templates() -> Vec<WafTemplate> {
             rule_id: 1_001_004,
             rule: r#"SecRule REQUEST_URI "@rx (?i)(?:\.(?:bak|old|sql|swp)$|/~$)" "id:1001004,phase:1,deny,status:403,log,msg:'1Panel Client backup/leak file protection'"#.into(),
         },
+        WafTemplate {
+            id: "path-traversal".into(),
+            name: "拦截路径穿越".into(),
+            description: "拒绝包含 ../、%2e%2e 等路径穿越特征，避免向站点目录之外读取文件。".into(),
+            risk: "内部路由或静态资源可能使用包含连续点号的合法路径。".into(),
+            rule_id: 1_001_005,
+            rule: r#"SecRule REQUEST_URI|REQUEST_FILENAME "@rx (?i)(?:%2e%2e|\.\./|\.\.\\|/\.\./|/\.\.$)" "id:1001005,phase:1,deny,status:403,log,msg:'1Panel Client path traversal protection'"#.into(),
+        },
+        WafTemplate {
+            id: "sql-injection".into(),
+            name: "拦截常见 SQL 注入特征".into(),
+            description: "按请求参数中的关键词拦截 union select、注入判断和延时函数等常见注入特征。".into(),
+            risk: "表单、搜索或接口可能包含类似注入的合法文本，可能产生误报。".into(),
+            rule_id: 1_001_006,
+            rule: r#"SecRule ARGS|REQUEST_URI "@rx (?i)(?:union[\s+]+select|select[\s+]+[^;]*[\s+]+from|insert[\s+]+into|(?:or|and)[\s+]+[0-9]+=[0-9]+|sleep[\s+]*\()" "id:1001006,phase:2,deny,status:403,log,msg:'1Panel Client SQL injection protection'"#.into(),
+        },
+        WafTemplate {
+            id: "cross-site-scripting".into(),
+            name: "拦截常见跨站脚本特征".into(),
+            description: "按请求参数拦截 <script、javascript:、事件处理器和 iframe 等常见 XSS 特征。".into(),
+            risk: "富文本或安全公告可能包含此类片段，可能产生误报。".into(),
+            rule_id: 1_001_007,
+            rule: r#"SecRule ARGS|REQUEST_URI "@rx (?i)(?:<script|javascript:|onerror[\s+]*=|onload[\s+]*=|onclick[\s+]*=|<iframe)" "id:1001007,phase:2,deny,status:403,log,msg:'1Panel Client cross-site scripting protection'"#.into(),
+        },
     ]
 }
 
@@ -2021,7 +2045,7 @@ mod tests {
     #[test]
     fn validates_waf_templates() {
         let templates = waf_templates();
-        assert_eq!(templates.len(), 4);
+        assert_eq!(templates.len(), 7);
         assert!(templates
             .iter()
             .all(|template| template.rule.contains("id:")));
@@ -2029,6 +2053,15 @@ mod tests {
         let ids: std::collections::HashSet<u32> =
             templates.iter().map(|template| template.rule_id).collect();
         assert_eq!(ids.len(), templates.len());
+        // 新增的策略模板必须带内联 id，与结构体 rule_id 保持一致。
+        for template in &templates {
+            let expected = format!("id:{}", template.rule_id);
+            assert!(
+                template.rule.contains(&expected),
+                "template {} rule id mismatch",
+                template.id
+            );
+        }
         // 每条规则必须是单行 SecRule/SecAction directive，且不能包含换行或空字符。
         assert!(templates.iter().all(|template| {
             let value = template.rule.trim();

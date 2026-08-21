@@ -53,6 +53,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_servers,
+            commands::diagnose_server_topology,
             commands::list_shortcuts,
             commands::save_shortcut,
             commands::delete_shortcut,
@@ -148,10 +149,12 @@ pub fn run() {
             commands::restore_database,
             commands::database_user_action,
             commands::get_database_privileges,
+            commands::get_database_privilege_diagnostic,
             commands::database_engine_action,
             commands::get_database_install_plan,
             commands::install_database_engine,
             commands::get_redis_data,
+            commands::redis_diagnostic,
             commands::redis_data_action,
             commands::redis_value_action,
             commands::redis_complex_action,
@@ -172,6 +175,7 @@ pub fn run() {
             commands::firewall_rule_action,
             commands::save_ssh_security,
             commands::get_websites,
+            commands::get_certificate_renewal_plan,
             commands::save_website,
             commands::website_action,
             commands::website_certificate_action,

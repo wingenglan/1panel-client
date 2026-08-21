@@ -200,6 +200,101 @@ pub fn resolve_proxy_jump_chain(
     Ok(chain)
 }
 
+/// 描述一次 ProxyJump 拓扑诊断发现的问题类型。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TopologyIssueKind {
+    SelfReference,
+    Orphan,
+    Cycle,
+    DepthExceeded,
+}
+
+/// 描述一个服务器 ProxyJump 拓扑诊断问题，用于客户端批量展示。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologyIssue {
+    pub server_id: String,
+    pub server_name: String,
+    pub kind: TopologyIssueKind,
+    pub message: String,
+}
+
+/// 对全部服务器档案做 ProxyJump 拓扑批量诊断，检测自引用、孤儿引用、循环和超长链路。
+///
+/// 输入为本地已知的全部服务器；每个档案返回其指向链路中遇到的第一个问题，
+/// 链路合法的档案不会出现在结果中。
+pub fn diagnose_proxy_jump_topology(servers: &[ServerProfile]) -> Vec<TopologyIssue> {
+    let links: HashMap<String, Option<String>> = servers
+        .iter()
+        .map(|server| (server.id.clone(), server.proxy_jump_id.clone()))
+        .collect();
+    servers
+        .iter()
+        .filter_map(|server| diagnose_proxy_jump_one(server, &links))
+        .collect()
+}
+
+/// 诊断单台服务器 ProxyJump 链路中的第一个问题；链路合法时返回 None。
+fn diagnose_proxy_jump_one(
+    server: &ServerProfile,
+    links: &HashMap<String, Option<String>>,
+) -> Option<TopologyIssue> {
+    let first = server.proxy_jump_id.clone()?;
+    let mut visited = HashSet::from([server.id.clone()]);
+    let mut current = first;
+    let mut depth = 0usize;
+    loop {
+        // 仅当首跳直接指向自身时判定为自引用；绕经其它节点回到自身的属于循环。
+        if depth == 0 && current == server.id {
+            return Some(topology_issue(
+                server,
+                TopologyIssueKind::SelfReference,
+                "该服务器把 ProxyJump 指向了自身",
+            ));
+        }
+        if !visited.insert(current.clone()) {
+            return Some(topology_issue(
+                server,
+                TopologyIssueKind::Cycle,
+                "ProxyJump 链路包含循环引用",
+            ));
+        }
+        if depth >= MAX_PROXY_JUMP_DEPTH {
+            return Some(topology_issue(
+                server,
+                TopologyIssueKind::DepthExceeded,
+                format!("ProxyJump 链路不能超过 {MAX_PROXY_JUMP_DEPTH} 个节点"),
+            ));
+        }
+        let Some(next) = links.get(&current).cloned() else {
+            return Some(topology_issue(
+                server,
+                TopologyIssueKind::Orphan,
+                format!("ProxyJump 引用了不存在的服务器 {current}"),
+            ));
+        };
+        // 下一跳为 None 表示链路正常结束，返回 None 不对该档案记录问题。
+        let next_id = next?;
+        current = next_id;
+        depth += 1;
+    }
+}
+
+/// 组装一条拓扑诊断记录。
+fn topology_issue(
+    server: &ServerProfile,
+    kind: TopologyIssueKind,
+    message: impl Into<String>,
+) -> TopologyIssue {
+    TopologyIssue {
+        server_id: server.id.clone(),
+        server_name: server.name.clone(),
+        kind,
+        message: message.into(),
+    }
+}
+
 impl SaveServerInput {
     /// 校验服务器档案及可选 ProxyJump 跳板引用，拒绝无法建立安全 SSH 会话的配置。
     pub fn validate(&self) -> crate::errors::AppResult<()> {
@@ -332,7 +427,10 @@ impl ServerRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_proxy_jump_chain, SaveServerInput};
+    use super::{
+        diagnose_proxy_jump_topology, resolve_proxy_jump_chain, SaveServerInput, ServerProfile,
+        TopologyIssueKind,
+    };
     use std::collections::HashMap;
 
     /// 构造一份可通过基础校验的服务器输入，供字段级验证测试复用。
@@ -412,5 +510,90 @@ mod tests {
                 .code,
             "PROXY_JUMP_DEPTH_EXCEEDED"
         );
+    }
+
+    /// 构造一份最小可用的服务器档案，供拓扑诊断测试复用。
+    fn profile(id: &str, name: &str, proxy_jump_id: Option<&str>) -> ServerProfile {
+        ServerProfile {
+            id: id.into(),
+            name: name.into(),
+            description: String::new(),
+            host: format!("{id}.example"),
+            port: 22,
+            username: "root".into(),
+            auth_type: "ssh_agent".into(),
+            private_key_path: None,
+            sudo_mode: "none".into(),
+            group_id: None,
+            tags: Vec::new(),
+            favorite: false,
+            connect_timeout: 10,
+            keepalive: 30,
+            encoding: "UTF-8".into(),
+            proxy_jump_id: proxy_jump_id.map(str::to_string),
+            last_connected_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn detects_self_reference_in_topology() {
+        let servers = vec![profile("a", "A", Some("a"))];
+        let issues = diagnose_proxy_jump_topology(&servers);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].server_id, "a");
+        assert_eq!(issues[0].kind, TopologyIssueKind::SelfReference);
+    }
+
+    #[test]
+    fn detects_orphan_reference_in_topology() {
+        let servers = vec![profile("a", "A", Some("missing"))];
+        let issues = diagnose_proxy_jump_topology(&servers);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, TopologyIssueKind::Orphan);
+    }
+
+    #[test]
+    fn detects_cycle_across_servers_in_topology() {
+        let servers = vec![profile("a", "A", Some("b")), profile("b", "B", Some("a"))];
+        let issues = diagnose_proxy_jump_topology(&servers);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.kind == TopologyIssueKind::Cycle));
+    }
+
+    #[test]
+    fn detects_depth_exceeded_in_topology() {
+        let mut servers: Vec<ServerProfile> = (0..=super::MAX_PROXY_JUMP_DEPTH)
+            .map(|index| {
+                let next = if index == super::MAX_PROXY_JUMP_DEPTH {
+                    None
+                } else {
+                    Some(format!("jump-{}", index + 1))
+                };
+                profile(
+                    &format!("jump-{index}"),
+                    &format!("Jump {index}"),
+                    next.as_deref(),
+                )
+            })
+            .collect();
+        servers.push(profile("target", "Target", Some("jump-0")));
+        let issues = diagnose_proxy_jump_topology(&servers);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.server_id == "target"
+                && issue.kind == TopologyIssueKind::DepthExceeded));
+    }
+
+    #[test]
+    fn accepts_valid_topology_without_issues() {
+        let servers = vec![
+            profile("a", "A", Some("jump")),
+            profile("jump", "Jump", None),
+            profile("b", "B", None),
+        ];
+        assert!(diagnose_proxy_jump_topology(&servers).is_empty());
     }
 }

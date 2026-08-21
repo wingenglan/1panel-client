@@ -1,4 +1,5 @@
 import Editor from "@monaco-editor/react";
+import "../../lib/monaco";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

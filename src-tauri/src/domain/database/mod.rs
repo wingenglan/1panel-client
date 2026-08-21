@@ -59,6 +59,23 @@ pub struct DatabasePrivilegeSnapshot {
     pub fetched_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// 一条权限模型诊断建议；severity 为 info 或 warning。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivilegeDiagnostic {
+    pub severity: String,
+    pub category: String,
+    pub message: String,
+}
+
+/// 数据库权限矩阵及其诊断建议。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabasePrivilegeDiagnostic {
+    pub snapshot: DatabasePrivilegeSnapshot,
+    pub diagnostics: Vec<PrivilegeDiagnostic>,
+}
+
 /// 一次数据库探测返回的引擎和实例列表。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -201,6 +218,35 @@ pub struct RedisSnapshot {
     pub total_keys: u64,
     pub keys: Vec<RedisKeyEntry>,
     pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Redis 连接诊断结果，不含任何键值或凭据。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisDiagnostic {
+    pub available: bool,
+    pub database: u8,
+    pub latency_ms: Option<u64>,
+    pub status: Option<String>,
+    pub version: Option<String>,
+    pub role: Option<String>,
+    pub mode: Option<String>,
+    pub uptime_seconds: Option<u64>,
+    pub connected_clients: Option<u64>,
+    pub used_memory_bytes: Option<u64>,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Redis 连接诊断请求；凭据只在本次远端命令中使用，不写入本地。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisDiagnosticInput {
+    pub server_id: String,
+    pub database: u8,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<SecretString>,
 }
 
 /// Redis 键查询请求；pattern 和 limit 只影响只读扫描范围。
@@ -525,6 +571,132 @@ pub async fn privilege_matrix(
     })
 }
 
+/// 读取数据库权限矩阵并附带安全诊断建议，便于识别过宽授权与通配主机。
+pub async fn database_privilege_diagnostic(
+    ssh: &SshConnectionManager,
+    input: DatabasePrivilegeInput,
+) -> AppResult<DatabasePrivilegeDiagnostic> {
+    let snapshot = privilege_matrix(ssh, input).await?;
+    let diagnostics = diagnose_privilege_matrix(&snapshot);
+    Ok(DatabasePrivilegeDiagnostic {
+        snapshot,
+        diagnostics,
+    })
+}
+
+/// 对权限矩阵做只读安全诊断：通配主机、全库授权、ALL 权限与 Redis 过宽 ACL。
+fn diagnose_privilege_matrix(snapshot: &DatabasePrivilegeSnapshot) -> Vec<PrivilegeDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if snapshot.engine == "redis" {
+        // Redis ACL 规则："~*" 允许所有键，"＋@all" 代表全部命令。
+        for entry in &snapshot.entries {
+            let scope = entry.database.to_uppercase();
+            let rules = entry.privileges.to_uppercase();
+            if scope.contains("~*") {
+                diagnostics.push(PrivilegeDiagnostic {
+                    severity: "warning".into(),
+                    category: "scope".into(),
+                    message: format!(
+                        "Redis 用户 {} 的 ACL 允许访问所有键（~*）",
+                        snapshot.username
+                    ),
+                });
+            }
+            if rules.contains("+@ALL") || rules.contains("ALLCOMMANDS") {
+                diagnostics.push(PrivilegeDiagnostic {
+                    severity: "warning".into(),
+                    category: "privilege".into(),
+                    message: format!(
+                        "Redis 用户 {} 的 ACL 允许全部命令（+@all）",
+                        snapshot.username
+                    ),
+                });
+            }
+        }
+        return diagnostics;
+    }
+    if snapshot.host.as_deref().map(str::trim) == Some("%") {
+        diagnostics.push(PrivilegeDiagnostic {
+            severity: "warning".into(),
+            category: "host".into(),
+            message: format!(
+                "账号 {} 允许从任意主机（%）连接，建议限定来源",
+                snapshot.username
+            ),
+        });
+    }
+    for entry in &snapshot.entries {
+        let database = entry.database.trim();
+        let privileges = entry.privileges.to_uppercase();
+        if database == "*.*" || database == "*" {
+            diagnostics.push(PrivilegeDiagnostic {
+                severity: "warning".into(),
+                category: "scope".into(),
+                message: format!(
+                    "账号 {} 被授予全部数据库（{}）",
+                    snapshot.username, database
+                ),
+            });
+        }
+        if privileges
+            .split(',')
+            .any(|part| part.trim() == "ALL" || part.trim() == "ALL PRIVILEGES")
+        {
+            diagnostics.push(PrivilegeDiagnostic {
+                severity: "info".into(),
+                category: "privilege".into(),
+                message: format!(
+                    "账号 {} 在 {} 上拥有 ALL PRIVILEGES",
+                    snapshot.username, database
+                ),
+            });
+        }
+    }
+    if matches!(snapshot.engine.as_str(), "mysql" | "mariadb") {
+        // MySQL/MariaDB 的 Grant Option 属于可继续授权他人，应单独标注。
+        for entry in &snapshot.entries {
+            let privileges = entry.privileges.to_uppercase();
+            if privileges
+                .split(',')
+                .any(|part| part.trim() == "GRANT OPTION")
+            {
+                diagnostics.push(PrivilegeDiagnostic {
+                    severity: "warning".into(),
+                    category: "delegation".into(),
+                    message: format!(
+                        "账号 {} 在 {} 上拥有 GRANT OPTION，可把自身权限继续授予其他用户",
+                        snapshot.username, entry.database
+                    ),
+                });
+            }
+        }
+    } else if snapshot.engine == "postgresql" {
+        // PostgreSQL 中具备 CREATE 的库越多，能新建对象的范围就越广。
+        let create_count = snapshot
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .privileges
+                    .to_uppercase()
+                    .split(',')
+                    .any(|part| part.trim() == "CREATE")
+            })
+            .count();
+        if create_count >= 2 {
+            diagnostics.push(PrivilegeDiagnostic {
+                severity: "info".into(),
+                category: "scope".into(),
+                message: format!(
+                    "账号 {} 在 {} 个数据库上拥有 CREATE 权限，可在较多目标中新建对象",
+                    snapshot.username, create_count
+                ),
+            });
+        }
+    }
+    diagnostics
+}
+
 /// 启动、停止或重启数据库服务，并返回刷新前的命令输出。
 pub async fn engine_action(
     ssh: &SshConnectionManager,
@@ -733,6 +905,118 @@ pub async fn redis_snapshot(
             "Redis 数据扫描结果无法解析",
         )
         .for_server(input.server_id)
+    })
+}
+
+/// 对单个 Redis 逻辑库做只读连接诊断：PING 延迟、版本、角色、客户端与内存摘要。
+pub async fn redis_diagnostic(
+    ssh: &SshConnectionManager,
+    input: RedisDiagnosticInput,
+) -> AppResult<RedisDiagnostic> {
+    validate_redis_diagnostic(&input)?;
+    let cli_options = redis_cli_options(input.username.as_deref(), input.password.as_ref())?;
+    let command = format!(
+        "set +e; if ! command -v redis-cli >/dev/null 2>&1; then printf '__REDIS_MISSING__\\n'; exit 0; fi; \
+         pong=$(redis-cli{cli} -n {db} PING 2>/dev/null); start=$(date +%s%N); redis-cli{cli} -n {db} PING >/dev/null 2>&1; end=$(date +%s%N); \
+         printf '__REDIS_PING__\\t%s\\n' \"$pong\"; \
+         printf '__REDIS_LATENCY_MS__\\t%s\\n' \"$(( (end-start)/1000000 ))\"; \
+         redis-cli{cli} -n {db} INFO server 2>/dev/null | grep -E '^(redis_version|role|redis_mode|uptime_in_seconds):'; \
+         redis-cli{cli} -n {db} INFO clients 2>/dev/null | grep -E '^connected_clients:'; \
+         redis-cli{cli} -n {db} INFO memory 2>/dev/null | grep -E '^used_memory:'",
+        cli = cli_options,
+        db = input.database,
+    );
+    let result = ssh
+        .execute_system(&input.server_id, &command, Duration::from_secs(30))
+        .await?;
+    if result.exit_code != 0 {
+        return Err(
+            AppError::new("REDIS_DIAGNOSTIC_FAILED", "database", "Redis 连接诊断失败")
+                .details(result.stderr)
+                .for_server(&input.server_id),
+        );
+    }
+    if result.stdout.contains("__REDIS_MISSING__") {
+        return Ok(RedisDiagnostic {
+            available: false,
+            database: input.database,
+            latency_ms: None,
+            status: None,
+            version: None,
+            role: None,
+            mode: None,
+            uptime_seconds: None,
+            connected_clients: None,
+            used_memory_bytes: None,
+            fetched_at: chrono::Utc::now(),
+        });
+    }
+    parse_redis_diagnostic(&result.stdout, input.database).ok_or_else(|| {
+        AppError::new(
+            "REDIS_DIAGNOSTIC_PARSE_FAILED",
+            "database",
+            "Redis 连接诊断结果无法解析",
+        )
+        .for_server(&input.server_id)
+    })
+}
+
+/// 校验 Redis 连接诊断请求：服务器标识与逻辑库范围必须合法。
+fn validate_redis_diagnostic(input: &RedisDiagnosticInput) -> AppResult<()> {
+    if input.server_id.trim().is_empty() || input.server_id.len() > 128 || input.database > 15 {
+        return Err(AppError::new(
+            "VALIDATION_FAILED",
+            "database",
+            "Redis 诊断参数无效",
+        ));
+    }
+    Ok(())
+}
+
+/// 解析 redis-cli PING/INFO 输出为连接诊断结构；缺少 PING 或版本时视为不可解析。
+fn parse_redis_diagnostic(output: &str, database: u8) -> Option<RedisDiagnostic> {
+    let mut latency_ms = None;
+    let mut status = None;
+    let mut version = None;
+    let mut role = None;
+    let mut mode = None;
+    let mut uptime_seconds = None;
+    let mut connected_clients = None;
+    let mut used_memory_bytes = None;
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("__REDIS_PING__\t") {
+            status = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("__REDIS_LATENCY_MS__\t") {
+            latency_ms = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("redis_version:") {
+            version = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("role:") {
+            role = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("redis_mode:") {
+            mode = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("uptime_in_seconds:") {
+            uptime_seconds = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("connected_clients:") {
+            connected_clients = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("used_memory:") {
+            used_memory_bytes = value.trim().parse().ok();
+        }
+    }
+    if status.is_none() && version.is_none() {
+        return None;
+    }
+    Some(RedisDiagnostic {
+        available: true,
+        database,
+        latency_ms,
+        status,
+        version,
+        role,
+        mode,
+        uptime_seconds,
+        connected_clients,
+        used_memory_bytes,
+        fetched_at: chrono::Utc::now(),
     })
 }
 
@@ -2314,14 +2598,16 @@ mod tests {
     use secrecy::SecretString;
 
     use super::{
-        database_user_command, install_command, install_definition, parse_package_manager,
-        parse_privilege_matrix, parse_redis_migration_count, parse_redis_snapshot,
-        parse_redis_transfer_count, parse_snapshot, redis_acl_rules, redis_cli_options,
-        valid_identifier, validate_privilege_input, validate_redis_action,
-        validate_redis_complex_action, validate_redis_migration, validate_redis_query,
-        validate_redis_transfer, validate_redis_value, validate_user_action,
-        DatabasePrivilegeInput, DatabaseUserActionInput, RedisActionInput, RedisComplexActionInput,
-        RedisMigrationInput, RedisQueryInput, RedisTransferInput, RedisValueInput,
+        database_user_command, diagnose_privilege_matrix, install_command, install_definition,
+        parse_package_manager, parse_privilege_matrix, parse_redis_diagnostic,
+        parse_redis_migration_count, parse_redis_snapshot, parse_redis_transfer_count,
+        parse_snapshot, redis_acl_rules, redis_cli_options, valid_identifier,
+        validate_privilege_input, validate_redis_action, validate_redis_complex_action,
+        validate_redis_migration, validate_redis_query, validate_redis_transfer,
+        validate_redis_value, validate_user_action, DatabasePrivilegeInput,
+        DatabasePrivilegeSnapshot, DatabaseUserActionInput, RedisActionInput,
+        RedisComplexActionInput, RedisMigrationInput, RedisQueryInput, RedisTransferInput,
+        RedisValueInput,
     };
 
     #[test]
@@ -2343,6 +2629,97 @@ mod tests {
         assert_eq!(entries[0].database, "app");
         assert_eq!(entries[0].privileges, "SELECT,INSERT");
         assert_eq!(entries[1].database, "postgres");
+    }
+
+    /// 验证权限矩阵诊断能识别通配主机、全库授权和 ALL 权限。
+    #[test]
+    fn diagnose_privilege_matrix_flags_broad_grants() {
+        let snapshot = DatabasePrivilegeSnapshot {
+            engine: "mysql".into(),
+            username: "app_user".into(),
+            host: Some("%".into()),
+            entries: vec![
+                super::DatabasePrivilegeEntry {
+                    database: "app".into(),
+                    privileges: "SELECT,UPDATE".into(),
+                },
+                super::DatabasePrivilegeEntry {
+                    database: "*.*".into(),
+                    privileges: "ALL PRIVILEGES".into(),
+                },
+            ],
+            fetched_at: chrono::Utc::now(),
+        };
+        let diagnostics = diagnose_privilege_matrix(&snapshot);
+        let categories: Vec<_> = diagnostics
+            .iter()
+            .map(|item| item.category.as_str())
+            .collect();
+        assert!(categories.contains(&"host"));
+        assert!(categories.contains(&"scope"));
+        assert!(categories.contains(&"privilege"));
+    }
+
+    /// 验证 Redis ACL 过宽规则（~*、+@all）会被标记为告警。
+    #[test]
+    fn diagnose_privilege_matrix_flags_broad_redis_acl() {
+        let snapshot = DatabasePrivilegeSnapshot {
+            engine: "redis".into(),
+            username: "ai".into(),
+            host: None,
+            entries: vec![super::DatabasePrivilegeEntry {
+                database: "~*".into(),
+                privileges: "+@all".into(),
+            }],
+            fetched_at: chrono::Utc::now(),
+        };
+        let diagnostics = diagnose_privilege_matrix(&snapshot);
+        assert!(diagnostics.iter().any(|item| item.category == "privilege"));
+        assert!(diagnostics.iter().any(|item| item.category == "scope"));
+    }
+
+    /// 验证 MySQL/MariaDB 的 GRANT OPTION 会被标记为可继续授权的告警。
+    #[test]
+    fn diagnose_privilege_matrix_flags_mysql_grant_option() {
+        let snapshot = DatabasePrivilegeSnapshot {
+            engine: "mysql".into(),
+            username: "app_writer".into(),
+            host: Some("10.0.0.5".into()),
+            entries: vec![super::DatabasePrivilegeEntry {
+                database: "app".into(),
+                privileges: "SELECT,INSERT,GRANT OPTION".into(),
+            }],
+            fetched_at: chrono::Utc::now(),
+        };
+        let diagnostics = diagnose_privilege_matrix(&snapshot);
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.category == "delegation" && item.severity == "warning"));
+    }
+
+    /// 验证 PostgreSQL 在多个数据库上拥有 CREATE 会被标记为范围较广。
+    #[test]
+    fn diagnose_privilege_matrix_flags_postgres_wide_create() {
+        let snapshot = DatabasePrivilegeSnapshot {
+            engine: "postgresql".into(),
+            username: "etl".into(),
+            host: None,
+            entries: vec![
+                super::DatabasePrivilegeEntry {
+                    database: "warehouse".into(),
+                    privileges: "CONNECT,CREATE".into(),
+                },
+                super::DatabasePrivilegeEntry {
+                    database: "staging".into(),
+                    privileges: "CONNECT,CREATE".into(),
+                },
+            ],
+            fetched_at: chrono::Utc::now(),
+        };
+        let diagnostics = diagnose_privilege_matrix(&snapshot);
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.category == "scope" && item.message.contains("2 个数据库")));
     }
 
     /// 校验不同数据库引擎的权限查询边界，确保系统账号和 Redis 缺失凭据会被拒绝。
@@ -2632,5 +3009,27 @@ mod tests {
         authenticated.target_username = Some("default".into());
         authenticated.target_password = Some(SecretString::from("secret"));
         assert!(validate_redis_migration(&authenticated).is_ok());
+    }
+
+    /// 验证 Redis 连接诊断能解析 PING 延迟、版本、角色、客户端与内存摘要。
+    #[test]
+    fn parses_redis_diagnostic_basics() {
+        let output = "__REDIS_PING__\tPONG\n__REDIS_LATENCY_MS__\t3\nredis_version:6.2.0\nrole:master\nredis_mode:standalone\nuptime_in_seconds:120\nconnected_clients:4\nused_memory:1048576\n";
+        let diagnostic = parse_redis_diagnostic(output, 0).expect("应能解析");
+        assert!(diagnostic.available);
+        assert_eq!(diagnostic.database, 0);
+        assert_eq!(diagnostic.status.as_deref(), Some("PONG"));
+        assert_eq!(diagnostic.latency_ms, Some(3));
+        assert_eq!(diagnostic.version.as_deref(), Some("6.2.0"));
+        assert_eq!(diagnostic.role.as_deref(), Some("master"));
+        assert_eq!(diagnostic.connected_clients, Some(4));
+        assert_eq!(diagnostic.used_memory_bytes, Some(1_048_576));
+    }
+
+    /// 验证缺少 PING 与版本（例如认证失败或异常返回）时诊断不可解析。
+    #[test]
+    fn redis_diagnostic_rejects_unparseable_output() {
+        assert!(parse_redis_diagnostic("__REDIS_LATENCY_MS__\t3\n", 0).is_none());
+        assert!(parse_redis_diagnostic("", 0).is_none());
     }
 }

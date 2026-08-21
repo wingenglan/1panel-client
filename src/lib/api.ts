@@ -17,9 +17,11 @@ import type {
   ToolInstallPlan,
   ToolInstallResult,
   ToolStatus,
+  TopologyIssue,
   NginxSnapshot,
   WebsiteSnapshot,
   CertificateActionResult,
+  CertificateRenewalPlan,
   PhpInstallPlan,
   PhpInstallResult,
   DockerActionResult,
@@ -33,9 +35,11 @@ import type {
   DatabaseSnapshot,
   DatabaseActionResult,
   DatabasePrivilegeSnapshot,
+  DatabasePrivilegeDiagnostic,
   DatabaseInstallPlan,
   DatabaseInstallResult,
   RedisSnapshot,
+  RedisDiagnostic,
   RedisTransferResult,
   RedisMigrationResult,
   RedisValueResult,
@@ -99,6 +103,7 @@ import type {
 
 export const api = {
   listServers: () => invoke<ServerProfile[]>("list_servers"),
+  diagnoseServerTopology: () => invoke<TopologyIssue[]>("diagnose_server_topology"),
   listShortcuts: (serverId?: string) => invoke<ShortcutRecord[]>("list_shortcuts", { serverId }),
   saveShortcut: (input: SaveShortcutInput) => invoke<ShortcutRecord>("save_shortcut", { input }),
   deleteShortcut: (id: string) => invoke<void>("delete_shortcut", { id }),
@@ -227,7 +232,7 @@ export const api = {
     targetPort: number; websocket: boolean; preserveHost: boolean;
   }) => invoke<NginxSnapshot>("save_nginx_proxy", { input }),
   websites: (serverId: string) => invoke<WebsiteSnapshot>("get_websites", { serverId }),
-  saveWebsite: (input: { serverId: string; domain: string; kind: "static" | "proxy"; listenPort: number; rootPath?: string; phpRuntime?: string; upstreamScheme?: "http" | "https"; upstreamHost?: string; upstreamPort?: number; enableHttps: boolean; httpsPort: number; certificatePath?: string; certificateKeyPath?: string; confirmed: boolean }) =>
+  saveWebsite: (input: { serverId: string; domain: string; kind: "static" | "proxy"; listenPort: number; rootPath?: string; phpRuntime?: string; phpSocket?: string; upstreamScheme?: "http" | "https"; upstreamHost?: string; upstreamPort?: number; enableHttps: boolean; httpsPort: number; certificatePath?: string; certificateKeyPath?: string; confirmed: boolean }) =>
     invoke<WebsiteSnapshot>("save_website", { input }),
   websiteAction: (input: { serverId: string; domain: string; action: "enable" | "disable" | "delete"; confirmed: boolean }) =>
     invoke<WebsiteSnapshot>("website_action", { input }),
@@ -235,6 +240,8 @@ export const api = {
     invoke<CertificateActionResult>("website_certificate_action", { input }),
   bindWebsiteCertificate: (input: { serverId: string; domain: string; certificatePath: string; certificateKeyPath: string; confirmed: boolean }) =>
     invoke<WebsiteSnapshot>("bind_website_certificate", { input }),
+  certificateRenewalPlan: (serverId: string, renewBeforeDays: number) =>
+    invoke<CertificateRenewalPlan[]>("get_certificate_renewal_plan", { serverId, renewBeforeDays }),
   phpInstallPlan: (serverId: string) => invoke<PhpInstallPlan>("get_php_install_plan", { serverId }),
   installPhp: (input: { serverId: string; confirmed: boolean }) =>
     invoke<PhpInstallResult>("install_php_runtime", { input }),
@@ -328,6 +335,8 @@ export const api = {
     invoke<DatabaseActionResult>("database_user_action", { input }),
   databasePrivileges: (input: { serverId: string; engine: string; username: string; host?: string; redisUsername?: string; redisPassword?: string }) =>
     invoke<DatabasePrivilegeSnapshot>("get_database_privileges", { input }),
+  databasePrivilegeDiagnostic: (input: { serverId: string; engine: string; username: string; host?: string; redisUsername?: string; redisPassword?: string }) =>
+    invoke<DatabasePrivilegeDiagnostic>("get_database_privilege_diagnostic", { input }),
   databaseEngineAction: (input: { serverId: string; engine: string; action: "start" | "stop" | "restart"; confirmed: boolean }) =>
     invoke<DatabaseActionResult>("database_engine_action", { input }),
   databaseInstallPlan: (serverId: string, engine: string) =>
@@ -340,6 +349,8 @@ export const api = {
   },
   redisData: (input: { serverId: string; database: number; pattern?: string; limit?: number; username?: string; password?: string }) =>
     invoke<RedisSnapshot>("get_redis_data", { input }),
+  redisDiagnostic: (input: { serverId: string; database: number; username?: string; password?: string }) =>
+    invoke<RedisDiagnostic>("redis_diagnostic", { input }),
   redisDataAction: (input: { serverId: string; database: number; action: "delete" | "flushdb"; key?: string; confirmed: boolean; username?: string; password?: string }) =>
     invoke<{ database: number; action: string; key: string | null; output: string }>("redis_data_action", { input }),
   redisValueAction: (input: { serverId: string; database: number; key: string; action: "get" | "set"; value?: string; ttlSeconds?: number; confirmed: boolean; username?: string; password?: string }) =>

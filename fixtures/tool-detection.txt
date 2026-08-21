@@ -3,4 +3,5 @@ docker	not-installed	-	na
 git	installed	git version 2.43.0	na
 curl	installed	curl 8.5.0	na
 tar	installed	tar (GNU tar) 1.35	na
+fail2ban	installed	fail2ban 1.0.2	1
 __PACKAGE_MANAGER__	apt

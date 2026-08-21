@@ -2,6 +2,7 @@ use crate::domain::nginx::NginxSnapshot;
 use crate::domain::ssh::SshConnectionManager;
 use crate::errors::{AppError, AppResult};
 use crate::security::shell_escape;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -97,6 +98,20 @@ pub struct CertificateTools {
     pub acme_sh: bool,
 }
 
+/// 一条证书续期规划；用于批量策略展示，实际签发仍走单域名 ACME 流程。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateRenewalPlan {
+    pub domain: String,
+    /// issue 或 renew。
+    pub action: String,
+    /// missing 或 expiring。
+    pub reason: String,
+    pub expires_at: Option<String>,
+    pub certificate_path: Option<String>,
+    pub renew_before_days: u32,
+}
+
 /// 申请或续期一个 HTTP-01 ACME 证书；所有写入都要求用户明确确认。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,6 +172,10 @@ pub struct SaveWebsiteInput {
     pub root_path: Option<String>,
     /// Optional PHP-FPM runtime id; only static sites can bind a runtime.
     pub php_runtime: Option<String>,
+    /// Optional FastCGI socket path visible inside the Nginx/OpenResty container.
+    /// When set, this overrides runtime resolution so a containerized PHP-FPM
+    /// socket reachable from the Nginx container can be used directly.
+    pub php_socket: Option<String>,
     pub upstream_scheme: Option<String>,
     pub upstream_host: Option<String>,
     pub upstream_port: Option<u16>,
@@ -843,6 +862,7 @@ pub async fn bind_certificate(
         listen_port: website.listen_port,
         root_path: website.root_path.clone(),
         php_runtime: None,
+        php_socket: None,
         upstream_scheme: upstream.as_ref().map(|value| value.0.clone()),
         upstream_host: upstream.as_ref().map(|value| value.1.clone()),
         upstream_port: upstream.as_ref().map(|value| value.2),
@@ -1080,6 +1100,9 @@ async fn resolve_php_socket(
     ssh: &SshConnectionManager,
     input: &SaveWebsiteInput,
 ) -> AppResult<Option<String>> {
+    if let Some(socket) = override_php_socket(input)? {
+        return Ok(Some(socket));
+    }
     let Some(runtime_id) = input.php_runtime.as_deref() else {
         return Ok(None);
     };
@@ -1122,6 +1145,23 @@ async fn resolve_php_socket(
         })?;
     validate_php_socket_path(&socket).map_err(|error| error.for_server(&input.server_id))?;
     Ok(Some(socket))
+}
+
+/// 处理显式指定的容器内可见 FastCGI socket；仅允许静态站点并校验路径安全。
+fn override_php_socket(input: &SaveWebsiteInput) -> AppResult<Option<String>> {
+    let Some(socket) = input.php_socket.as_deref() else {
+        return Ok(None);
+    };
+    if input.kind != "static" {
+        return Err(AppError::new(
+            "VALIDATION_FAILED",
+            "website",
+            "PHP-FPM socket 只能绑定到静态站点",
+        )
+        .for_server(&input.server_id));
+    }
+    validate_php_socket_path(socket).map_err(|error| error.for_server(&input.server_id))?;
+    Ok(Some(socket.to_string()))
 }
 
 /// 渲染静态或反向代理 server block；用户输入已在调用前完成验证。
@@ -1314,7 +1354,10 @@ fn validate_save_input(input: &SaveWebsiteInput) -> AppResult<()> {
         if let Some(runtime) = input.php_runtime.as_deref() {
             validate_php_runtime_id(runtime)?;
         }
-    } else if input.php_runtime.is_some() {
+        if let Some(socket) = input.php_socket.as_deref() {
+            validate_php_socket_path(socket)?;
+        }
+    } else if input.php_runtime.is_some() || input.php_socket.is_some() {
         return Err(AppError::new(
             "VALIDATION_FAILED",
             "website",
@@ -1504,6 +1547,52 @@ fn parse_certificate_tools(output: &str) -> CertificateTools {
     }
 }
 
+/// 按证书到期情况生成批量续期/签发规划；只读取已有快照，不触发远端写入。
+pub fn certificate_renewal_plan(
+    snapshot: &WebsiteSnapshot,
+    renew_before_days: u32,
+) -> Vec<CertificateRenewalPlan> {
+    let mut plans = Vec::new();
+    for website in &snapshot.websites {
+        if !website.enabled || !website.ssl {
+            continue;
+        }
+        if website.certificate_path.is_none() || website.expires_at.is_none() {
+            plans.push(CertificateRenewalPlan {
+                domain: website.domain.clone(),
+                action: "issue".into(),
+                reason: "missing".into(),
+                expires_at: None,
+                certificate_path: website.certificate_path.clone(),
+                renew_before_days,
+            });
+            continue;
+        }
+        let days = certificate_expiry_days(website.expires_at.as_deref().unwrap_or_default());
+        if days.is_some_and(|remaining| remaining <= renew_before_days as i64) {
+            plans.push(CertificateRenewalPlan {
+                domain: website.domain.clone(),
+                action: "renew".into(),
+                reason: "expiring".into(),
+                expires_at: website.expires_at.clone(),
+                certificate_path: website.certificate_path.clone(),
+                renew_before_days,
+            });
+        }
+    }
+    plans
+}
+
+/// 计算证书 notAfter 值相对当前时间的剩余天数，无法解析时返回 None。
+fn certificate_expiry_days(value: &str) -> Option<i64> {
+    let date_value = value.strip_suffix(" GMT").unwrap_or(value);
+    let parsed = NaiveDateTime::parse_from_str(date_value, "%b %e %H:%M:%S %Y")
+        .or_else(|_| NaiveDateTime::parse_from_str(date_value, "%b %d %H:%M:%S %Y"))
+        .ok()?;
+    let parsed = DateTime::<Utc>::from_naive_utc_and_offset(parsed, Utc);
+    Some((parsed - Utc::now()).num_days())
+}
+
 /// 校验证书操作的域名、邮箱、webroot 和动作，阻止 shell 注入与路径穿越。
 fn validate_certificate_action(input: &CertificateActionInput) -> AppResult<()> {
     if !matches!(input.action.as_str(), "issue" | "renew")
@@ -1631,11 +1720,12 @@ fn valid_upstream_host(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        acme_install_command, parse_certificate_tools, parse_php_runtimes, parse_upstream_target,
-        parse_website_config, render_website, valid_aliyun_dns_token, valid_aws_dns_token,
-        valid_dnspod_dns_token, valid_domain, valid_email, valid_tencent_dns_token,
-        validate_certificate_path, BindWebsiteCertificateInput, CertificateActionInput,
-        SaveWebsiteInput, WebsiteKind,
+        acme_install_command, certificate_renewal_plan, override_php_socket,
+        parse_certificate_tools, parse_php_runtimes, parse_upstream_target, parse_website_config,
+        render_website, valid_aliyun_dns_token, valid_aws_dns_token, valid_dnspod_dns_token,
+        valid_domain, valid_email, valid_tencent_dns_token, validate_certificate_path,
+        validate_php_socket_path, BindWebsiteCertificateInput, CertificateActionInput,
+        CertificateTools, SaveWebsiteInput, WebsiteKind, WebsiteRecord, WebsiteSnapshot,
     };
     use secrecy::SecretString;
 
@@ -1796,6 +1886,7 @@ mod tests {
             listen_port: 80,
             root_path: None,
             php_runtime: Some("php8.3-fpm".into()),
+            php_socket: None,
             upstream_scheme: None,
             upstream_host: None,
             upstream_port: None,
@@ -1812,5 +1903,147 @@ mod tests {
         );
         assert!(rendered.contains("fastcgi_pass unix:/run/php/php8.3-fpm.sock;"));
         assert!(rendered.contains("index index.html index.htm index.php;"));
+    }
+
+    /// 验证容器内显式 socket 会覆盖 runtime 解析，并渲染为 FastCGI 路径。
+    #[test]
+    fn uses_explicit_container_socket_for_php_binding() {
+        let input = SaveWebsiteInput {
+            server_id: "server".into(),
+            domain: "demo.example.com".into(),
+            kind: "static".into(),
+            listen_port: 80,
+            root_path: None,
+            php_runtime: None,
+            php_socket: Some("/tmp/php-cgi/app.sock".into()),
+            upstream_scheme: None,
+            upstream_host: None,
+            upstream_port: None,
+            enable_https: false,
+            https_port: 443,
+            certificate_path: None,
+            certificate_key_path: None,
+            confirmed: true,
+        };
+        assert_eq!(
+            override_php_socket(&input).unwrap(),
+            Some("/tmp/php-cgi/app.sock".into())
+        );
+        let rendered = render_website(
+            &input,
+            "/www/sites/demo.example.com",
+            input.php_socket.as_deref(),
+        );
+        assert!(rendered.contains("fastcgi_pass unix:/tmp/php-cgi/app.sock;"));
+    }
+
+    /// 验证非静态站点显式指定 socket 会被拒绝，且不安全路径无法通过校验。
+    #[test]
+    fn rejects_unsafe_explicit_php_socket() {
+        let mut input = SaveWebsiteInput {
+            server_id: "server".into(),
+            domain: "demo.example.com".into(),
+            kind: "proxy".into(),
+            listen_port: 80,
+            root_path: None,
+            php_runtime: None,
+            php_socket: Some("/tmp/php-cgi/app.sock".into()),
+            upstream_scheme: Some("http".into()),
+            upstream_host: Some("127.0.0.1".into()),
+            upstream_port: Some(8080),
+            enable_https: false,
+            https_port: 443,
+            certificate_path: None,
+            certificate_key_path: None,
+            confirmed: true,
+        };
+        assert!(override_php_socket(&input).is_err());
+        input.kind = "static".into();
+        input.php_socket = Some("/tmp/../etc/passwd".into());
+        assert!(validate_php_socket_path(input.php_socket.as_deref().unwrap()).is_err());
+    }
+
+    /// 验证证书续期规划只覆盖启用的 HTTPS 站点，区分缺失证书与即将到期。
+    #[test]
+    fn plans_certificate_renewals_for_enabled_sites() {
+        let snapshot = WebsiteSnapshot {
+            supported: true,
+            managed_conf_dir: Some("/etc/nginx/conf.d".into()),
+            runtime_root: Some("/www/sites".into()),
+            host_root: Some("/opt/1panel/apps/openresty/www/sites".into()),
+            websites: vec![
+                WebsiteRecord {
+                    domain: "healthy.example.com".into(),
+                    kind: WebsiteKind::Static,
+                    enabled: true,
+                    listen_port: 80,
+                    root_path: Some("/www/sites/healthy".into()),
+                    upstream: None,
+                    php_runtime: None,
+                    ssl: true,
+                    certificate_path: Some("/www/certs/healthy/fullchain.pem".into()),
+                    expires_at: Some("Jan  1 00:00:00 2099 GMT".into()),
+                    config_path: "/etc/nginx/conf.d/healthy.conf".into(),
+                },
+                WebsiteRecord {
+                    domain: "expiring.example.com".into(),
+                    kind: WebsiteKind::Static,
+                    enabled: true,
+                    listen_port: 80,
+                    root_path: Some("/www/sites/expiring".into()),
+                    upstream: None,
+                    php_runtime: None,
+                    ssl: true,
+                    certificate_path: Some("/www/certs/expiring/fullchain.pem".into()),
+                    expires_at: Some("Jan  1 00:00:00 2000 GMT".into()),
+                    config_path: "/etc/nginx/conf.d/expiring.conf".into(),
+                },
+                WebsiteRecord {
+                    domain: "missing.example.com".into(),
+                    kind: WebsiteKind::Proxy,
+                    enabled: true,
+                    listen_port: 443,
+                    root_path: None,
+                    upstream: Some("http://127.0.0.1:8080".into()),
+                    php_runtime: None,
+                    ssl: true,
+                    certificate_path: None,
+                    expires_at: None,
+                    config_path: "/etc/nginx/conf.d/missing.conf".into(),
+                },
+                WebsiteRecord {
+                    domain: "disabled.example.com".into(),
+                    kind: WebsiteKind::Static,
+                    enabled: false,
+                    listen_port: 80,
+                    root_path: Some("/www/sites/disabled".into()),
+                    upstream: None,
+                    php_runtime: None,
+                    ssl: true,
+                    certificate_path: None,
+                    expires_at: None,
+                    config_path: "/etc/nginx/conf.d/disabled.conf".into(),
+                },
+            ],
+            php_runtimes: vec![],
+            certificate_tools: CertificateTools {
+                certbot: true,
+                acme_sh: false,
+            },
+            warnings: vec![],
+            fetched_at: "1970-01-01T00:00:00Z".into(),
+        };
+        let plans = certificate_renewal_plan(&snapshot, 30);
+        let domains: Vec<_> = plans.iter().map(|plan| plan.domain.as_str()).collect();
+        assert!(domains.contains(&"expiring.example.com"));
+        assert!(domains.contains(&"missing.example.com"));
+        assert!(!domains.contains(&"healthy.example.com"));
+        assert!(!domains.contains(&"disabled.example.com"));
+        assert!(plans
+            .iter()
+            .any(|plan| plan.domain == "expiring.example.com" && plan.action == "renew"));
+        assert!(plans
+            .iter()
+            .any(|plan| plan.domain == "missing.example.com" && plan.action == "issue"));
     }
 }

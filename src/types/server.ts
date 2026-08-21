@@ -23,6 +23,15 @@ export interface ServerProfile {
   updatedAt: string;
 }
 
+export type TopologyIssueKind = "selfReference" | "orphan" | "cycle" | "depthExceeded";
+
+export interface TopologyIssue {
+  serverId: string;
+  serverName: string;
+  kind: TopologyIssueKind;
+  message: string;
+}
+
 export interface SaveServerInput {
   id?: string;
   name: string;
@@ -213,8 +222,17 @@ export interface FstabEntry {
   pass: string;
 }
 
+export interface StorageTopology {
+  disks: number;
+  partitions: number;
+  raidArrays: number;
+  lvmVolumes: number;
+  otherDevices: number;
+}
+
 export interface StorageSnapshot {
   devices: StorageDevice[];
+  topology: StorageTopology;
   mounts: StorageMount[];
   fstab: FstabEntry[];
   warnings: string[];
@@ -498,6 +516,15 @@ export interface CertificateActionResult {
   output: string;
 }
 
+export interface CertificateRenewalPlan {
+  domain: string;
+  action: "issue" | "renew";
+  reason: "missing" | "expiring";
+  expiresAt: string | null;
+  certificatePath: string | null;
+  renewBeforeDays: number;
+}
+
 export interface DockerSnapshot {
   installed: boolean;
   running: boolean;
@@ -675,6 +702,17 @@ export interface DatabasePrivilegeSnapshot {
   fetchedAt: string;
 }
 
+export interface PrivilegeDiagnostic {
+  severity: "info" | "warning";
+  category: string;
+  message: string;
+}
+
+export interface DatabasePrivilegeDiagnostic {
+  snapshot: DatabasePrivilegeSnapshot;
+  diagnostics: PrivilegeDiagnostic[];
+}
+
 export interface DatabaseSnapshot {
   engines: DatabaseEngine[];
   databases: DatabaseRecord[];
@@ -716,6 +754,20 @@ export interface RedisSnapshot {
   database: number;
   totalKeys: number;
   keys: RedisKeyEntry[];
+  fetchedAt: string;
+}
+
+export interface RedisDiagnostic {
+  available: boolean;
+  database: number;
+  latencyMs: number | null;
+  status: string | null;
+  version: string | null;
+  role: string | null;
+  mode: string | null;
+  uptimeSeconds: number | null;
+  connectedClients: number | null;
+  usedMemoryBytes: number | null;
   fetchedAt: string;
 }
 

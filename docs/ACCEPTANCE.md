@@ -1,6 +1,6 @@
 # Acceptance Status
 
-更新时间：2026-08-21
+更新时间：2026-08-22
 
 标记：`[x]` 已由自动化或真实环境验证；`[~]` 已有核心实现但仍有覆盖范围或平台证据待补；`[ ]` 尚未实现。
 
@@ -10,14 +10,14 @@
 - [x] `pnpm build`（Vite production bundle；Monaco 主 chunk 体积仅为 warning）
 - [x] `cargo fmt --all --check`
 - [x] `cargo clippy --all-targets --all-features -- -D warnings`
-- [x] `cargo test --all-features`（148 passed / 5 ignored / 0 failed；真实目录备份轮换、网站/应用备份、外部 SFTP 上传、存储快照与 WAF CRS 能力 SSH smoke 另行通过）
+- [x] `cargo test --all-features`（162 passed / 5 ignored / 0 failed；真实目录备份轮换、网站/应用备份、外部 SFTP 上传、存储快照与 WAF CRS 能力 SSH smoke 另行通过）
 - [x] `pnpm tauri build`（Windows x64 MSI + NSIS；使用 NASM 3.02）
 
 ## 已有核心实现
 
 - [x] 多服务器档案、密码/私钥/SSH Agent SSH、严格 Host Key、多级 ProxyJump（链路展示与循环检测）、SFTP 文件、PTY 终端、系统概览、进程/端口、systemd、日志、任务中心、审计和安全存储。
 - [~] 工具箱：能力探测与受控安装；更多发行版工具仍待补齐。
-- [~] 网站：OpenResty/Nginx 静态站点、反向代理、配置测试/reload/回滚、证书元数据、certbot/acme.sh HTTP-01、Cloudflare DNS-01、acme.sh 阿里云/DNSPod/腾讯云/AWS Route 53 DNS-01、PHP-FPM 探测/安装计划与静态站点 FastCGI 绑定、同域证书自动绑定；容器内 PHP socket 映射和证书批量策略待补。
+- [~] 网站：OpenResty/Nginx 静态站点、反向代理、配置测试/reload/回滚、证书元数据、certbot/acme.sh HTTP-01、Cloudflare DNS-01、acme.sh 阿里云/DNSPod/腾讯云/AWS Route 53 DNS-01、PHP-FPM 探测/安装计划与静态站点 FastCGI 绑定、同域证书自动绑定、静态站点可指定容器内 PHP socket 覆盖。证书批量策略后端/IPC/前端面板已接，但面板 CSS 未完成且未做视觉验收。
 - [~] Docker/Compose：容器、镜像、卷、网络、日志、Inspect、Stats、Exec、Pull/Run/Build（构建参数、流式输出、取消）、最近 Events 摘要和项目生命周期；完整 Docker Desktop 级细节仍待补。
 - [~] 应用商店：Compose 目录、安装、启动/停止/重启/卸载与卸载后恢复、日志、官方最新模板升级回滚、升级前 Compose 哈希/行数差异预览、官方分支提交号同步显示、环境变量合并编辑、容器健康检查和基于 Docker project label 的清理候选预览；本地 TTL 缓存、离线回退、最多 8 个有序静态镜像节点故障转移、缓存清理已接入；可生成包含 metadata/版本 Compose/env 的静态镜像目录，并生成 HMAC-SHA256 catalog.sig、在客户端使用操作系统密钥链验签。
 - [~] AI：OpenAI-compatible 供应商、系统密钥链、真实 Chat Completions 与可取消 SSE 流式输出、真实 `/models` 能力探测；只读服务器概览智能体（function calling、步数上限、真实 SSH 工具）、按供应商隔离的本地会话恢复/清理和 MCP stdio/远程 HTTP-SSE JSON-RPC 工具发现/调用已接入，远程 Bearer 令牌只存系统密钥链；更多工具编排和真实第三方 MCP 兼容性仍需验收。
@@ -40,6 +40,15 @@
 - [x] 外部 SFTP 备份账号真实 SSH smoke：从测试节点读取临时归档，通过独立 SFTP 会话上传到临时目标目录，校验内容后删除账号、远端目录和密钥链条目。
 - [x] 存储真实 SSH smoke：读取测试服务器 lsblk/findmnt/df/fstab，确认返回根挂载点；未执行挂载、卸载或 fstab 写入，未改变远端状态。
 - [~] 文件上传/下载、终端 PTY、Docker 生命周期、应用安装等更广泛真实流程仍需后续逐项验收。
+
+## 大阶段视觉运行验收
+
+- [ ] 浏览器打开 `https://panel.wingeng.xyz/`，对照 1Panel v2.2.5 的当前页面与操作流程。
+- [ ] 启动客户端 `pnpm tauri dev`，用 [`TEST_SERVER.md`](TEST_SERVER.md) 的 SSH 凭据登录并首次核对 Host Key。
+- [ ] 逐页打开本轮改动涉及页面，验证加载/空态/错误态/表单/点击/结果，并与 1Panel 对照。
+- [ ] 把截图结论、异常与控制台错误写回本文件与 `docs/CURRENT_STATE.md`。
+
+前置条件：Computer Use / Chrome 的 Node REPL（`node_repl js`）服务已挂到当前会话。未挂载时只能由用户手动操作，不能把静态构建当作视觉验收。
 
 ## 安装包
 

@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 const TOOL_IDS: &[&str] = &[
-    "nginx", "docker", "git", "curl", "wget", "jq", "tar", "unzip", "rsync", "tmux", "htop", "lsof",
+    "nginx", "docker", "git", "curl", "wget", "jq", "tar", "unzip", "rsync", "tmux", "htop",
+    "lsof", "fail2ban", "certbot", "tree", "ncdu", "iperf3", "make",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +153,54 @@ const DEFINITIONS: &[ToolDefinition] = &[
         rhel_package: "lsof",
         daemon: false,
     },
+    ToolDefinition {
+        id: "fail2ban",
+        name: "Fail2ban",
+        description: "登录失败防护与封禁",
+        debian_package: "fail2ban",
+        rhel_package: "fail2ban",
+        daemon: true,
+    },
+    ToolDefinition {
+        id: "certbot",
+        name: "Certbot",
+        description: "Let's Encrypt 证书签发与续期",
+        debian_package: "certbot",
+        rhel_package: "certbot",
+        daemon: false,
+    },
+    ToolDefinition {
+        id: "tree",
+        name: "tree",
+        description: "目录结构树状展示",
+        debian_package: "tree",
+        rhel_package: "tree",
+        daemon: false,
+    },
+    ToolDefinition {
+        id: "ncdu",
+        name: "ncdu",
+        description: "交互式磁盘占用分析",
+        debian_package: "ncdu",
+        rhel_package: "ncdu",
+        daemon: false,
+    },
+    ToolDefinition {
+        id: "iperf3",
+        name: "iperf3",
+        description: "网络吞吐与带宽测试",
+        debian_package: "iperf3",
+        rhel_package: "iperf3",
+        daemon: false,
+    },
+    ToolDefinition {
+        id: "make",
+        name: "make",
+        description: "构建工具",
+        debian_package: "make",
+        rhel_package: "make",
+        daemon: false,
+    },
 ];
 
 /// 通过远程标准命令探测工具是否存在、版本和 daemon 状态。
@@ -270,7 +319,7 @@ fn invalid_tool(tool_id: &str) -> AppError {
 fn detection_command() -> String {
     let commands = TOOL_IDS.join(" ");
     format!(
-        "for command in {commands}; do if command -v \"$command\" >/dev/null 2>&1; then version=$(\"$command\" --version 2>&1 | head -n 1); running=na; case \"$command\" in nginx|docker) if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet \"$command\"; then running=1; elif command -v rc-service >/dev/null 2>&1 && rc-service \"$command\" status >/dev/null 2>&1; then running=1; else running=0; fi;; esac; printf '%s\\tinstalled\\t%s\\t%s\\n' \"$command\" \"$version\" \"$running\"; else printf '%s\\tnot-installed\\t-\\tna\\n' \"$command\"; fi; done; printf '__PACKAGE_MANAGER__\\t'; if command -v apt-get >/dev/null 2>&1; then printf 'apt\\n'; elif command -v dnf >/dev/null 2>&1; then printf 'dnf\\n'; elif command -v yum >/dev/null 2>&1; then printf 'dnf\\n'; elif command -v apk >/dev/null 2>&1; then printf 'apk\\n'; elif command -v pacman >/dev/null 2>&1; then printf 'pacman\\n'; else printf 'unknown\\n'; fi"
+        "for command in {commands}; do if command -v \"$command\" >/dev/null 2>&1; then version=$(\"$command\" --version 2>&1 | head -n 1); running=na; case \"$command\" in nginx|docker|fail2ban) if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet \"$command\"; then running=1; elif command -v rc-service >/dev/null 2>&1 && rc-service \"$command\" status >/dev/null 2>&1; then running=1; else running=0; fi;; esac; printf '%s\\tinstalled\\t%s\\t%s\\n' \"$command\" \"$version\" \"$running\"; else printf '%s\\tnot-installed\\t-\\tna\\n' \"$command\"; fi; done; printf '__PACKAGE_MANAGER__\\t'; if command -v apt-get >/dev/null 2>&1; then printf 'apt\\n'; elif command -v dnf >/dev/null 2>&1; then printf 'dnf\\n'; elif command -v yum >/dev/null 2>&1; then printf 'dnf\\n'; elif command -v apk >/dev/null 2>&1; then printf 'apk\\n'; elif command -v pacman >/dev/null 2>&1; then printf 'pacman\\n'; else printf 'unknown\\n'; fi"
     )
 }
 
@@ -355,10 +404,18 @@ mod tests {
     fn parses_registry_and_package_manager() {
         let output = include_str!("../../../../fixtures/tool-detection.txt");
         let values = parse_detection(output, Some("apt"));
-        assert_eq!(values.len(), 12);
+        assert_eq!(values.len(), 18);
         assert!(values[0].installed);
         assert_eq!(values[0].install_package.as_deref(), Some("nginx"));
         assert!(!values[1].installed);
+        // 新增的守护进程工具 fail2ban 应被识别为已安装并处于运行状态。
+        let fail2ban = values
+            .iter()
+            .find(|value| value.id == "fail2ban")
+            .expect("fail2ban 应存在于工具清单");
+        assert!(fail2ban.installed);
+        assert_eq!(fail2ban.running, Some(true));
+        assert_eq!(fail2ban.install_package.as_deref(), Some("fail2ban"));
         assert_eq!(detect_package_manager(output).as_deref(), Some("apt"));
         assert_eq!(
             detect_package_manager("__PACKAGE_MANAGER__\tapk\n").as_deref(),

@@ -1,7 +1,9 @@
 use crate::app::AppState;
 use crate::domain::files::{DirectoryListing, RemoteTextFile, SaveTextInput};
 use crate::domain::metrics::SystemOverview;
-use crate::domain::server::{SaveServerInput, ServerProfile};
+use crate::domain::server::{
+    diagnose_proxy_jump_topology, SaveServerInput, ServerProfile, TopologyIssue,
+};
 use crate::domain::shortcuts::{SaveShortcutInput, ShortcutRecord};
 use crate::domain::ssh::{ConnectOutcome, ConnectionSnapshot, TrustHostKeyInput};
 use crate::errors::AppResult;
@@ -133,6 +135,13 @@ async fn audit_outcome<T>(
 #[tauri::command]
 pub async fn list_servers(state: State<'_, AppState>) -> AppResult<Vec<ServerProfile>> {
     state.servers.list().await
+}
+
+/// 对全部服务器档案执行 ProxyJump 拓扑批量诊断，不访问任何远端。
+#[tauri::command]
+pub async fn diagnose_server_topology(state: State<'_, AppState>) -> AppResult<Vec<TopologyIssue>> {
+    let servers = state.servers.list().await?;
+    Ok(diagnose_proxy_jump_topology(&servers))
 }
 
 /// Lists enabled global shortcuts plus enabled server-specific overrides for terminal completion.
@@ -1627,6 +1636,15 @@ pub async fn get_database_privileges(
     result
 }
 
+/// 读取数据库权限矩阵并返回安全诊断建议（通配主机、全库授权、ALL 权限、Redis 过宽 ACL）。
+#[tauri::command]
+pub async fn get_database_privilege_diagnostic(
+    input: crate::domain::database::DatabasePrivilegeInput,
+    state: State<'_, AppState>,
+) -> AppResult<crate::domain::database::DatabasePrivilegeDiagnostic> {
+    crate::domain::database::database_privilege_diagnostic(&state.ssh, input).await
+}
+
 /// 管理数据库 systemd 服务生命周期，并写入脱敏审计事件。
 #[tauri::command]
 pub async fn database_engine_action(
@@ -1685,6 +1703,15 @@ pub async fn get_redis_data(
     state: State<'_, AppState>,
 ) -> AppResult<crate::domain::database::RedisSnapshot> {
     crate::domain::database::redis_snapshot(&state.ssh, input).await
+}
+
+/// 对 Redis 逻辑库执行只读连接诊断（PING 延迟、版本、角色与内存摘要）。
+#[tauri::command]
+pub async fn redis_diagnostic(
+    input: crate::domain::database::RedisDiagnosticInput,
+    state: State<'_, AppState>,
+) -> AppResult<crate::domain::database::RedisDiagnostic> {
+    crate::domain::database::redis_diagnostic(&state.ssh, input).await
 }
 
 /// 删除 Redis 键或清空逻辑库，并写入不含值内容的审计事件。
@@ -2173,6 +2200,20 @@ pub async fn get_websites(
     state: State<'_, AppState>,
 ) -> AppResult<crate::domain::website::WebsiteSnapshot> {
     crate::domain::website::snapshot(&state.ssh, &server_id).await
+}
+
+/// 计算启用的 HTTPS 站点里需要签发或续期的证书批量规划。
+#[tauri::command]
+pub async fn get_certificate_renewal_plan(
+    server_id: String,
+    renew_before_days: u32,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::domain::website::CertificateRenewalPlan>> {
+    let snapshot = crate::domain::website::snapshot(&state.ssh, &server_id).await?;
+    Ok(crate::domain::website::certificate_renewal_plan(
+        &snapshot,
+        renew_before_days,
+    ))
 }
 
 /// 创建或替换静态/反向代理站点，并在本地写入审计事件。

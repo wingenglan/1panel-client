@@ -98,6 +98,14 @@ cargo test --all-features
 - 是否执行变更、变更对象、验证与 cleanup；
 - bundle/installer 是否真实存在。
 
+每个大阶段收口后，除上述代码门禁外，还必须完成真实视觉运行验收：
+
+- 用测试服务器凭据启动客户端并登录（首次核对 Host Key）；
+- 逐页查看本轮改动，并与 `https://panel.wingeng.xyz/` 对照 1Panel v2.2.5 的 UI 与操作；
+- 把截图结论、异常与控制台错误写回 `ACCEPTANCE.md` 和 `CURRENT_STATE.md`。
+
+测试服务器与面板凭据见 `docs/TEST_SERVER.md`。视觉验收依赖 Computer Use / Chrome 的 Node REPL（`node_repl js`）服务；未挂载时只能由用户手动操作，不能把静态构建当成视觉验收。
+
 ## 6. 更新下一步，保证可立即执行
 
 `NEXT_STEPS.md` 第一项必须是下一位 Agent 能直接执行的具体任务，包含：

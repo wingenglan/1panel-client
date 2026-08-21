@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, Eraser, EyeOff, History as HistoryIcon, Minus, Pencil, Plus, Power, RotateCw, Search, Sparkles, TerminalSquare, X } from "lucide-react";
+import { ArrowDown, Columns2, Eraser, EyeOff, History as HistoryIcon, Minus, Pencil, Plus, Power, RotateCw, Search, Sparkles, TerminalSquare, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { NavLink, useParams } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
@@ -58,6 +58,7 @@ export function TerminalPage() {
   const [clearRequest, setClearRequest] = useState(0);
   const [historyOpenKey, setHistoryOpenKey] = useState<string | null>(null);
   const [shortcutManagerOpen, setShortcutManagerOpen] = useState(false);
+  const [splitTab, setSplitTab] = useState<TerminalTab | null>(null);
 
   const addTab = () => {
     const tab = newTab(tabs.length + 1);
@@ -89,6 +90,15 @@ export function TerminalPage() {
   const toggleShortcuts = (key: string) => {
     setTabs((current) => current.map((tab) => tab.key === key ? { ...tab, shortcutsEnabled: !tab.shortcutsEnabled, shortcutToggleVersion: tab.shortcutToggleVersion + 1 } : tab));
   };
+  /** 打开/关闭左右分屏；分屏会话独立于标签页，拥有自己的 PTY 实例。 */
+  const toggleSplit = () => {
+    if (splitTab) { setSplitTab(null); return; }
+    setSplitTab({ ...newTab(tabs.length + 1), title: "分屏" });
+  };
+  /** 重启分屏会话的 PTY（保留同一分屏面板）。 */
+  const reopenSplit = () => {
+    setSplitTab((current) => current ? { ...current, revision: current.revision + 1 } : current);
+  };
 
   return <section className="terminal-page">
     <div className="workspace-header terminal-header">
@@ -110,10 +120,13 @@ export function TerminalPage() {
         </div>
         <button className="terminal-add" title="新建终端" onClick={addTab}><Plus size={14} /></button>
         {searchOpen && <form className="terminal-search" onSubmit={(event) => { event.preventDefault(); setSearchRequest((value) => value + 1); }}><Search size={12} /><input autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索输出" /><button type="button" onClick={() => setSearchOpen(false)}><X size={12} /></button></form>}
-        <div className="terminal-tools"><button title="搜索终端输出" onClick={() => setSearchOpen((value) => !value)}><Search size={14} /></button><button title="查看当前 shell 命令历史" onClick={() => setHistoryOpenKey((value) => value === activeKey ? null : activeKey)}><HistoryIcon size={14} /></button><button title="清屏" onClick={() => setClearRequest((value) => value + 1)}><Eraser size={14} /></button><button onClick={() => setFontSize((value) => Math.max(9, value - 1))} title="缩小字体"><Minus size={14} /></button><span>{fontSize}px</span><button onClick={() => setFontSize((value) => Math.min(24, value + 1))} title="放大字体"><Plus size={14} /></button></div>
+        <div className="terminal-tools"><button title="搜索终端输出" onClick={() => setSearchOpen((value) => !value)}><Search size={14} /></button><button title="查看当前 shell 命令历史" onClick={() => setHistoryOpenKey((value) => value === activeKey ? null : activeKey)}><HistoryIcon size={14} /></button><button title="清屏" onClick={() => setClearRequest((value) => value + 1)}><Eraser size={14} /></button><button title={splitTab ? "关闭分屏" : "左右分屏"} onClick={toggleSplit}><Columns2 size={14} /></button><button onClick={() => setFontSize((value) => Math.max(9, value - 1))} title="缩小字体"><Minus size={14} /></button><span>{fontSize}px</span><button onClick={() => setFontSize((value) => Math.min(24, value + 1))} title="放大字体"><Plus size={14} /></button></div>
       </div>
       {connection.data?.status !== "online" && <div className="terminal-blocked">服务器连接已断开。<NavLink to={`/servers/${serverId}`}>返回概览重新连接</NavLink></div>}
-      {tabs.map((tab) => <SessionTerminal key={`${tab.key}:${tab.revision}`} serverId={serverId} active={activeKey === tab.key} fontSize={fontSize} shortcutsEnabled={tab.shortcutsEnabled} shortcutToggleVersion={tab.shortcutToggleVersion} shortcuts={shortcuts.data ?? []} historyOpen={historyOpenKey === tab.key} onHistoryClose={() => setHistoryOpenKey(null)} searchQuery={searchQuery} searchRequest={activeKey === tab.key ? searchRequest : 0} clearRequest={activeKey === tab.key ? clearRequest : 0} onReconnect={() => reopenTab(tab.key)} />)}
+      <div className={`terminal-sessions ${splitTab ? "is-split" : ""}`}>
+        {tabs.map((tab) => <SessionTerminal key={`${tab.key}:${tab.revision}`} serverId={serverId} active={activeKey === tab.key} focused={activeKey === tab.key} fontSize={fontSize} shortcutsEnabled={tab.shortcutsEnabled} shortcutToggleVersion={tab.shortcutToggleVersion} shortcuts={shortcuts.data ?? []} historyOpen={historyOpenKey === tab.key} onHistoryClose={() => setHistoryOpenKey(null)} searchQuery={searchQuery} searchRequest={activeKey === tab.key ? searchRequest : 0} clearRequest={activeKey === tab.key ? clearRequest : 0} onReconnect={() => reopenTab(tab.key)} />)}
+        {splitTab && <SessionTerminal key={`${splitTab.key}:${splitTab.revision}`} serverId={serverId} active focused={false} fontSize={fontSize} shortcutsEnabled={splitTab.shortcutsEnabled} shortcutToggleVersion={splitTab.shortcutToggleVersion} shortcuts={shortcuts.data ?? []} historyOpen={false} onHistoryClose={() => undefined} searchQuery={searchQuery} searchRequest={0} clearRequest={0} onReconnect={reopenSplit} />}
+      </div>
     </div>
     <ShortcutManager serverId={serverId} open={shortcutManagerOpen} onClose={() => { setShortcutManagerOpen(false); void shortcuts.refetch(); }} />
   </section>;
@@ -122,6 +135,7 @@ export function TerminalPage() {
 interface SessionProps {
   serverId: string;
   active: boolean;
+  focused?: boolean;
   fontSize: number;
   searchQuery: string;
   searchRequest: number;
@@ -134,13 +148,14 @@ interface SessionProps {
   onReconnect: () => void;
 }
 
-function SessionTerminal({ serverId, active, fontSize, shortcutsEnabled, shortcutToggleVersion, shortcuts, historyOpen, onHistoryClose, searchQuery, searchRequest, clearRequest, onReconnect }: SessionProps) {
+function SessionTerminal({ serverId, active, focused = true, fontSize, shortcutsEnabled, shortcutToggleVersion, shortcuts, historyOpen, onHistoryClose, searchQuery, searchRequest, clearRequest, onReconnect }: SessionProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
   const terminalIdRef = useRef<string | null>(null);
   const activeRef = useRef(active);
+  const focusedRef = useRef(focused);
   const [status, setStatus] = useState<"opening" | "online" | "closed" | "error">("opening");
   const [error, setError] = useState<string | null>(null);
   const [inputBuffer, setInputBuffer] = useState("");
@@ -167,6 +182,9 @@ function SessionTerminal({ serverId, active, fontSize, shortcutsEnabled, shortcu
   useEffect(() => {
     activeRef.current = active;
   }, [active]);
+  useEffect(() => {
+    focusedRef.current = focused;
+  }, [focused]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -196,7 +214,7 @@ function SessionTerminal({ serverId, active, fontSize, shortcutsEnabled, shortcu
       if (disposed) { void api.closeTerminal(terminalId); return; }
       terminalIdRef.current = terminalId;
       setStatus("online");
-      if (activeRef.current) terminal.focus();
+      if (activeRef.current && focusedRef.current) terminal.focus();
     }).catch((reason) => { if (!disposed) { setStatus("error"); setError(errorMessage(reason)); } });
 
     /** Records a submitted command with the terminal line where its output begins. */
@@ -301,7 +319,7 @@ function SessionTerminal({ serverId, active, fontSize, shortcutsEnabled, shortcu
   }, [serverId]);
 
   useEffect(() => { if (terminalRef.current) terminalRef.current.options.fontSize = fontSize; fitRef.current?.fit(); }, [fontSize]);
-  useEffect(() => { if (active) { requestAnimationFrame(() => { fitRef.current?.fit(); terminalRef.current?.focus(); }); } }, [active]);
+  useEffect(() => { if (active) { requestAnimationFrame(() => { fitRef.current?.fit(); if (focused) terminalRef.current?.focus(); }); } }, [active, focused]);
   useEffect(() => { if (searchRequest && searchQuery) searchRef.current?.findNext(searchQuery, { caseSensitive: false, incremental: false }); }, [searchQuery, searchRequest]);
   useEffect(() => {
     if (!clearRequest) return;

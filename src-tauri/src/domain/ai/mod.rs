@@ -720,6 +720,14 @@ fn agent_tools(mcp_runtime: Option<&mcp::Runtime>) -> serde_json::Value {
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "server_processes",
+                "description": "读取选定服务器运行中的进程与监听端口摘要，含 CPU/内存占用（只读）",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+            }
+        }),
     ];
     if let Some(runtime) = mcp_runtime {
         if let serde_json::Value::Array(values) = runtime.openai_tools() {
@@ -738,7 +746,11 @@ async fn execute_agent_tool(
 ) -> String {
     if !matches!(
         call.function.name.as_str(),
-        "server_overview" | "server_websites" | "server_docker" | "server_security"
+        "server_overview"
+            | "server_websites"
+            | "server_docker"
+            | "server_security"
+            | "server_processes"
     ) {
         if let Some(runtime) = mcp_runtime {
             return runtime
@@ -858,6 +870,37 @@ async fn execute_agent_tool(
                 "warnings": snapshot.warnings,
             })
             .to_string(),
+            Err(error) => serde_json::json!({"error": error.message}).to_string(),
+        },
+        "server_processes" => match crate::domain::operations::snapshot(ssh, server_id, false).await {
+            Ok(snapshot) => {
+                let mut top: Vec<_> = snapshot.processes.iter().collect();
+                top.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap_or(std::cmp::Ordering::Equal));
+                let processes: Vec<_> = top.into_iter().take(60).map(|process| serde_json::json!({
+                    "pid": process.pid,
+                    "user": process.user,
+                    "state": process.state,
+                    "cpuPercent": process.cpu_percent,
+                    "memoryPercent": process.memory_percent,
+                    "rssBytes": process.rss_bytes,
+                    "name": process.name,
+                    "systemdUnit": process.systemd_unit,
+                })).collect();
+                let ports: Vec<_> = snapshot.ports.iter().take(80).map(|port| serde_json::json!({
+                    "protocol": port.protocol,
+                    "localAddress": port.local_address,
+                    "port": port.port,
+                    "pid": port.pid,
+                    "processName": port.process_name,
+                })).collect();
+                serde_json::json!({
+                    "processCount": snapshot.processes.len(),
+                    "listeningPorts": snapshot.ports.len(),
+                    "topProcesses": processes,
+                    "listeningPortsDetail": ports,
+                })
+                .to_string()
+            }
             Err(error) => serde_json::json!({"error": error.message}).to_string(),
         },
         _ => serde_json::json!({"error": "不允许的智能体工具"}).to_string(),
@@ -1349,7 +1392,8 @@ mod tests {
                 "server_overview",
                 "server_websites",
                 "server_docker",
-                "server_security"
+                "server_security",
+                "server_processes"
             ]
         );
         assert!(names.iter().all(|name| !name.contains("delete")));

@@ -3066,6 +3066,7 @@ mod tests {
                     listen_port: website_port,
                     root_path: None,
                     php_runtime: None,
+                    php_socket: None,
                     upstream_scheme: None,
                     upstream_host: None,
                     upstream_port: None,

@@ -47,11 +47,23 @@ pub struct FstabEntry {
     pub pass: String,
 }
 
+/// 块设备拓扑摘要，便于快速识别磁盘、分区、RAID 阵列与 LVM 卷。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageTopology {
+    pub disks: usize,
+    pub partitions: usize,
+    pub raid_arrays: usize,
+    pub lvm_volumes: usize,
+    pub other_devices: usize,
+}
+
 /// 返回磁盘、挂载点和 fstab 的真实远程快照。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageSnapshot {
     pub devices: Vec<StorageDevice>,
+    pub topology: StorageTopology,
     pub mounts: Vec<StorageMount>,
     pub fstab: Vec<FstabEntry>,
     pub warnings: Vec<String>,
@@ -175,13 +187,36 @@ pub fn parse_snapshot(input: &str) -> AppResult<StorageSnapshot> {
     if mounts.is_empty() {
         warnings.push("远端没有返回挂载点；请检查 findmnt/proc 权限".into());
     }
+    let topology = compute_topology(&devices);
     Ok(StorageSnapshot {
         devices,
+        topology,
         mounts,
         fstab,
         warnings,
         fetched_at: chrono::Utc::now(),
     })
+}
+
+/// 根据块设备类型汇总拓扑结构；RAID 类型以 `raid` 前缀识别。
+fn compute_topology(devices: &[StorageDevice]) -> StorageTopology {
+    let mut topology = StorageTopology {
+        disks: 0,
+        partitions: 0,
+        raid_arrays: 0,
+        lvm_volumes: 0,
+        other_devices: 0,
+    };
+    for device in devices {
+        match device.kind.as_str() {
+            "disk" => topology.disks += 1,
+            "part" => topology.partitions += 1,
+            kind if kind.starts_with("raid") => topology.raid_arrays += 1,
+            "lvm" => topology.lvm_volumes += 1,
+            _ => topology.other_devices += 1,
+        }
+    }
+    topology
 }
 
 /// 将 lsblk 的 KEY="VALUE" 行解析为设备摘要。
@@ -586,7 +621,8 @@ fn is_protected_mountpoint(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_action_command, parse_snapshot, validate_action, FstabEntry, StorageActionInput,
+        build_action_command, compute_topology, parse_snapshot, validate_action, FstabEntry,
+        StorageActionInput, StorageDevice,
     };
     use crate::domain::ssh::{ConnectOutcome, TrustHostKeyInput};
     use crate::infra::db::ServerRepository;
@@ -620,6 +656,35 @@ mod tests {
         let entry: &FstabEntry = &value.fstab[0];
         assert_eq!(entry.line_number, 7);
         assert_eq!(entry.filesystem, "ext4");
+        assert_eq!(value.topology.partitions, 1);
+    }
+
+    /// 验证块设备拓扑能把 disk/part/raid/lvm 分类汇总。
+    #[test]
+    fn computes_storage_topology() {
+        let device = |kind: &str| StorageDevice {
+            name: kind.into(),
+            path: format!("/dev/{kind}"),
+            kind: kind.into(),
+            filesystem: None,
+            size_bytes: 0,
+            readonly: false,
+            removable: false,
+            mountpoint: None,
+            model: None,
+        };
+        let topology = compute_topology(&[
+            device("disk"),
+            device("part"),
+            device("raid1"),
+            device("lvm"),
+            device("loop"),
+        ]);
+        assert_eq!(topology.disks, 1);
+        assert_eq!(topology.partitions, 1);
+        assert_eq!(topology.raid_arrays, 1);
+        assert_eq!(topology.lvm_volumes, 1);
+        assert_eq!(topology.other_devices, 1);
     }
 
     #[test]

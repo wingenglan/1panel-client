@@ -1,5 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import Editor from "@monaco-editor/react";
+import "../../lib/monaco";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Box, Code2, Container, Copy, Download, ExternalLink, FileText, ListTree, Pause, Play, RefreshCw, RotateCw, Search, ShieldAlert, Square, SquareTerminal, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";

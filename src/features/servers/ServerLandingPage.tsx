@@ -12,6 +12,7 @@ import { ServerDialog } from "./ServerDialog";
 export function ServerLandingPage() {
   const [open, setOpen] = useState(false);
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.listServers });
+  const topology = useQuery({ queryKey: ["server-topology"], queryFn: api.diagnoseServerTopology });
   const total = servers.data?.length ?? 0;
 
   return (
@@ -26,6 +27,15 @@ export function ServerLandingPage() {
         <article><Activity size={18} /><span><small>活动任务</small><strong>本地管理</strong></span></article>
         <article><ShieldCheck size={18} /><span><small>凭据策略</small><strong>系统安全存储</strong></span></article>
       </div>
+
+      {topology.data && topology.data.length > 0 && (
+        <div className="node-topology-warning">
+          <header><ShieldCheck size={16} />ProxyJump 拓扑诊断发现 {topology.data.length} 处问题</header>
+          <ul>
+            {topology.data.map((issue) => <li key={`${issue.serverId}:${issue.kind}`}><strong>{issue.serverName}</strong> · {issue.message}</li>)}
+          </ul>
+        </div>
+      )}
 
       {servers.isLoading && <div className="panel-loading">正在读取本地服务器档案…</div>}
       {!servers.isLoading && !total && (
