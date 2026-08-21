@@ -1,0 +1,16 @@
+nginx version: nginx/1.24.0
+__RUNNING__
+# configuration file /etc/nginx/nginx.conf:
+http {
+    include /etc/nginx/conf.d/*.conf;
+}
+# configuration file /etc/nginx/conf.d/demo.conf:
+server {
+    listen 443 ssl;
+    server_name demo.example.com api.example.com;
+    ssl_certificate /etc/letsencrypt/live/demo/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/demo/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+    }
+}

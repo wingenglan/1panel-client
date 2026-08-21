@@ -1,0 +1,48 @@
+[package]
+name = "onepanel-client"
+version = "0.1.0"
+description = "Multi-server desktop client inspired by 1Panel"
+authors = ["1Panel Client contributors"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "onepanel_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2.7.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+russh = "0.62.6"
+russh-sftp = "2.4.0"
+keyring = "4.1.6"
+secrecy = { version = "0.10.3", features = ["serde"] }
+zeroize = "1.9.0"
+chrono = { version = "0.4.45", features = ["serde"] }
+dashmap = "6.2.1"
+thiserror = "2.0.20"
+anyhow = "1.0.104"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "migrate", "chrono", "uuid"] }
+base64 = "0.23.1"
+hmac = "0.13.0"
+sha2 = "0.11.0"
+argon2 = "0.6.0-rc.8"
+aes-gcm = "0.11.0"
+rand = "0.10.2"

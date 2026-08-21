@@ -1,0 +1,2 @@
+tcp LISTEN 0 511 0.0.0.0:8080 0.0.0.0:* users:(("node",pid=1234,fd=19))
+tcp LISTEN 0 128 [::]:22 [::]:*

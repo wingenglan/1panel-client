@@ -1,0 +1,18 @@
+__VERSION__
+{"Version":"27.0.1","ApiVersion":"1.46"}
+__INFO__
+{"OperatingSystem":"Ubuntu 24.04","Architecture":"x86_64","Driver":"overlay2","CgroupVersion":"2","DockerRootDir":"/var/lib/docker"}
+__CONTAINERS__
+{"ID":"abc123","Names":"web","Image":"nginx:latest","Status":"Up 2 hours (healthy)","CreatedAt":"2026-08-13 08:00:00 +0000 UTC","Ports":"0.0.0.0:8088->80/tcp"}
+__CONTAINER_RESOURCES__
+abc123	unless-stopped	2000000000	536870912
+__IMAGES__
+{"Repository":"nginx","Tag":"latest","ID":"sha256:abc","CreatedAt":"2026-08-12 08:00:00 +0000 UTC","Size":"188MB"}
+__VOLUMES__
+{"Name":"relay-data","Driver":"local","Mountpoint":"/var/lib/docker/volumes/relay-data/_data","Labels":""}
+__NETWORKS__
+{"ID":"abc123","Name":"bridge","Driver":"bridge","Scope":"local"}
+__DISK__
+{"Type":"Images","TotalCount":"1","Size":"188MB"}
+__COMPOSE__
+[{"Name":"relay","Status":"running(2)","ConfigFiles":"/srv/relay/compose.yaml","WorkingDir":"/srv/relay"}]

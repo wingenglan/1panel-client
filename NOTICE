@@ -1,0 +1,17 @@
+1Panel Client
+Copyright (c) 2026 1Panel Client contributors
+
+This project is an independent multi-server desktop client inspired by the
+open-source 1Panel project:
+
+  https://github.com/1Panel-dev/1Panel
+  Upstream reference commit: 14728f889e810d5a0c19eaa4a923110921ebe7b7
+
+1Panel is developed by Shenzhen FIT2CLOUD Technology Co., Ltd. This project
+is not an official 1Panel distribution and does not copy the official 1Panel
+trademark artwork. The interface and desktop multi-server architecture have
+been modified for this project.
+
+The SSH/SFTP desktop operations foundation was derived from the local
+server-manager project and has been relicensed for this combined work under
+GNU GPL version 3.
