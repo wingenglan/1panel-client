@@ -38,6 +38,9 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test --run
       - run: pnpm build
+        env:
+          # Monaco's production build exceeds the macOS runner's default 2 GiB heap.
+          NODE_OPTIONS: --max-old-space-size=4096
       - run: cargo fmt --check
         working-directory: src-tauri
       - run: cargo clippy --all-targets --all-features -- -D warnings
