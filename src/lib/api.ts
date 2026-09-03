@@ -85,6 +85,7 @@ import type {
   McpServerConfig,
   McpProbeResult,
   DockerResourceActionResult,
+  DockerPruneResult,
   DockerComposeDetails,
   PublicServerExport,
   PublicServerImport,
@@ -136,10 +137,11 @@ export const api = {
     columns: number,
     rows: number,
     onEvent: (event: TerminalEvent) => void,
+    command?: string,
   ) => {
     const channel = new Channel<TerminalEvent>();
     channel.onmessage = onEvent;
-    return invoke<string>("open_terminal", { serverId, columns, rows, onEvent: channel });
+    return invoke<string>("open_terminal", { serverId, columns, rows, command: command ?? null, onEvent: channel });
   },
   writeTerminal: (terminalId: string, data: Uint8Array) =>
     invoke<void>("write_terminal", { terminalId, data: Array.from(data) }),
@@ -236,6 +238,8 @@ export const api = {
     invoke<WebsiteSnapshot>("save_website", { input }),
   websiteAction: (input: { serverId: string; domain: string; action: "enable" | "disable" | "delete"; confirmed: boolean }) =>
     invoke<WebsiteSnapshot>("website_action", { input }),
+  websiteNginxService: (input: { serverId: string; action: "stop" | "start" | "restart" | "reload"; confirmed: boolean }) =>
+    invoke<NginxSnapshot>("website_nginx_service", { input }),
   certificateAction: (input: { serverId: string; domain: string; email: string; webroot: string; action: "issue" | "renew"; challenge?: "http01" | "dns01"; dnsProvider?: "cloudflare" | "aliyun" | "dnspod" | "tencent" | "aws"; dnsApiToken?: string; confirmed: boolean }) =>
     invoke<CertificateActionResult>("website_certificate_action", { input }),
   bindWebsiteCertificate: (input: { serverId: string; domain: string; certificatePath: string; certificateKeyPath: string; confirmed: boolean }) =>
@@ -289,15 +293,21 @@ export const api = {
     channel.onmessage = onEvent;
     return invoke<DockerLogs>("docker_container_follow_logs", { serverId, containerId, tail, sudo, taskId, onEvent: channel });
   },
-  dockerResourceAction: (input: { serverId: string; kind: "volume" | "network"; name: string; action: "create" | "remove"; sudo?: boolean; confirmed?: boolean }) =>
+  dockerResourceAction: (input: { serverId: string; kind: "volume" | "network"; name: string; action: "create" | "remove"; driver?: string; sudo?: boolean; confirmed?: boolean }) =>
     invoke<DockerResourceActionResult>("docker_resource_action", { input }),
   dockerImageAction: (input: { serverId: string; image: string; action: "remove"; force?: boolean; sudo?: boolean; confirmed?: boolean }) =>
     invoke<DockerResourceActionResult>("docker_image_action", { input }),
+  /** 释放 Docker 磁盘占用（镜像/容器/卷/构建缓存 prune），Rust 校验确认。 */
+  dockerPrune: (input: { serverId: string; kind: "images" | "containers" | "volumes" | "networks" | "builders"; sudo?: boolean; confirmed?: boolean }) =>
+    invoke<DockerPruneResult>("docker_prune", { input }),
   dockerResourceInspect: (input: { serverId: string; kind: "volume" | "network"; name: string; sudo?: boolean }) =>
     invoke<DockerTextResult>("docker_resource_inspect", { input }),
   /** 执行 Compose 生命周期或显式 cleanup，并由 Rust 校验 destructive confirmation。 */
   dockerComposeAction: (input: { serverId: string; project: string; workingDir?: string; action: "up" | "down" | "start" | "stop" | "restart" | "pull" | "build" | "cleanup"; sudo?: boolean; confirmed?: boolean }) =>
     invoke<DockerResourceActionResult>("docker_compose_action", { input }),
+  /** 创建 Compose 项目：写 compose.yaml 并启动；Rust 校验确认并拒绝覆盖已有文件。 */
+  dockerComposeCreate: (input: { serverId: string; name: string; content: string; workingDir?: string; forcePull?: boolean; sudo?: boolean; confirmed?: boolean }) =>
+    invoke<DockerResourceActionResult>("docker_compose_create", { input }),
   /** 保存 Compose 原始 YAML；Rust 端会先 config -q，失败自动恢复。 */
   dockerComposeSaveYaml: (input: { serverId: string; project: string; workingDir?: string; configPath: string; content: string; expectedSize: number; expectedModifiedAt: number | null; force?: boolean; sudo?: boolean; confirmed: boolean }) =>
     invoke<RemoteTextFile>("docker_compose_save_yaml", { input }),

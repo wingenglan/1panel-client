@@ -99,27 +99,27 @@ pub async fn snapshot(
     privileged: bool,
 ) -> AppResult<OperationsSnapshot> {
     let (processes, ports, services) = tokio::join!(
-        execute_probe(
+        Box::pin(execute_probe(
             ssh,
             server_id,
             "ps -eo pid=,ppid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,comm=,args=",
             Duration::from_secs(30),
             privileged,
-        ),
-        execute_probe(
+        )),
+        Box::pin(execute_probe(
             ssh,
             server_id,
             port_scan_command(),
             Duration::from_secs(30),
             privileged,
-        ),
-        execute_probe(
+        )),
+        Box::pin(execute_probe(
             ssh,
             server_id,
             "systemctl list-units --type=service --all --no-legend --no-pager --plain",
             Duration::from_secs(30),
             privileged,
-        )
+        ))
     );
     let processes = processes?;
     let ports = ports?;

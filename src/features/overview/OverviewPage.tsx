@@ -1,18 +1,17 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
-import { Activity, Box, Copy, Cpu, FileText, HardDrive, KeyRound, Lightbulb, LogOut, MemoryStick, Network, Pencil, Power, RefreshCw, Save, ShieldAlert, StickyNote, TerminalSquare, Trash2, X } from "lucide-react";
-import { useMemo, useState } from "react";
-import { NavLink, useNavigate, useParams } from "react-router-dom";
+import { Check, ChevronDown, Copy, Edit, Eye, EyeOff, FileText, LogOut, Pencil, Power, RefreshCw, ShieldAlert, Terminal, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { api, isHostKeyChallenge } from "../../lib/api";
-import { formatBytes, formatDuration } from "../../lib/format";
+import { formatDuration, formatBytes } from "../../lib/format";
 import { errorMessage } from "../../lib/errors";
-import { connectionStatusLabel } from "../../lib/i18n";
-import type { HostKeyChallenge } from "../../types/server";
+import type { HostKeyChallenge, MetricSample, SystemOverview } from "../../types/server";
 import { ServerDialog } from "../servers/ServerDialog";
 
-/** 展示服务器连接状态、实时概览和连接失败的可执行建议。 */
+/** 1Panel 面板首页：概览统计、系统状态、监控图表、系统信息与本地备忘、应用入口。 */
 export function OverviewPage() {
   const { serverId = "" } = useParams();
   const navigate = useNavigate();
@@ -20,14 +19,16 @@ export function OverviewPage() {
   const [challenge, setChallenge] = useState<HostKeyChallenge | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [serviceTarget, setServiceTarget] = useState<{ name: string; action: "start" | "restart" } | null>(null);
+  const [serviceTarget, setServiceTarget] = useState<{ name: string; action: "start" | "stop" | "restart" } | null>(null);
   const [serviceLogs, setServiceLogs] = useState<{ name: string; output: string } | null>(null);
-  const [historyHours, setHistoryHours] = useState<1 | 6 | 24>(1);
   const profile = useQuery({ queryKey: ["server", serverId], queryFn: () => api.getServer(serverId), enabled: !!serverId });
   const connection = useQuery({ queryKey: ["connection", serverId], queryFn: () => api.connectionState(serverId), enabled: !!serverId, refetchInterval: 5000 });
   const overview = useQuery({ queryKey: ["overview", serverId], queryFn: () => api.overview(serverId), enabled: connection.data?.status === "online", refetchInterval: 5000 });
-  const history = useQuery({ queryKey: ["metric-history", serverId, historyHours], queryFn: () => api.metricHistory(serverId, new Date(Date.now() - historyHours * 60 * 60 * 1000).toISOString()), enabled: connection.data?.status === "online", refetchInterval: 5000 });
+  const history = useQuery({ queryKey: ["metric-history", serverId, "1h"], queryFn: () => api.metricHistory(serverId, new Date(Date.now() - 60 * 60 * 1000).toISOString()), enabled: connection.data?.status === "online", refetchInterval: 5000 });
   const memo = useQuery({ queryKey: ["overview-memo", serverId], queryFn: () => api.overviewMemo(serverId), enabled: !!serverId });
+  const websites = useQuery({ queryKey: ["websites", serverId], queryFn: () => api.websites(serverId), enabled: connection.data?.status === "online", refetchInterval: 15000 });
+  const databases = useQuery({ queryKey: ["databases", serverId], queryFn: () => api.database(serverId), enabled: connection.data?.status === "online", refetchInterval: 15000 });
+  const installedApps = useQuery({ queryKey: ["installed-apps", serverId], queryFn: () => api.installedApps(serverId), enabled: connection.data?.status === "online", refetchInterval: 15000 });
   const connect = useMutation({ mutationFn: () => api.connectServer(serverId), onSuccess: async (value) => { if (isHostKeyChallenge(value)) setChallenge(value); else await queryClient.invalidateQueries({ queryKey: ["connection", serverId] }); } });
   const reconnect = useMutation({ mutationFn: () => api.reconnectServer(serverId), onSuccess: async (value) => { if (isHostKeyChallenge(value)) setChallenge(value); else await queryClient.invalidateQueries({ queryKey: ["connection", serverId] }); } });
   const trust = useMutation({ mutationFn: () => api.trustHostKey(challenge!), onSuccess: async () => { setChallenge(null); await queryClient.invalidateQueries({ queryKey: ["connection", serverId] }); } });
@@ -42,21 +43,51 @@ export function OverviewPage() {
   if (profile.error || !profile.data) return <div className="page-state page-state--error">无法读取服务器配置。</div>;
   const server = profile.data;
   const online = connection.data?.status === "online";
+  const data = overview.data;
+
+  const quickJump = [
+    { name: "智能体", count: 0, to: "/ai" },
+    { name: "网站", count: websites.data?.websites.length ?? 0, to: `/servers/${serverId}/website` },
+    { name: "数据库 - 所有", count: databases.data?.databases.length ?? 0, to: `/servers/${serverId}/database` },
+    { name: "已安装应用", count: installedApps.data?.apps.length ?? 0, to: `/servers/${serverId}/appstore` },
+  ];
 
   return (
-    <section className="overview-page">
-      <div className="workspace-header">
-        <div><div className="breadcrumb">服务器 / <span>{server.name}</span></div><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port}</p></div>
-        <div className="workspace-header__actions"><span className={`connection-pill ${online ? "is-online" : ""}`}><i /> {connectionStatusLabel(connection.data?.status)}</span><Button variant="ghost" onClick={() => setEditOpen(true)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" onClick={() => duplicate.mutate()} disabled={duplicate.isPending}><Copy size={14} /> {duplicate.isPending ? "复制中…" : "复制档案"}</Button>{online ? <><Button variant="ghost" onClick={() => disconnect.mutate()} disabled={disconnect.isPending}><LogOut size={14} /> 断开</Button><Button variant="secondary" onClick={() => navigate(`/servers/${serverId}/terminal`)}><TerminalSquare size={15} /> 打开终端</Button></> : <Button variant="primary" onClick={() => connect.mutate()} disabled={connect.isPending || reconnect.isPending}><Power size={15} /> {connect.isPending || reconnect.isPending ? "连接中…" : connection.data?.status === "error" ? "重新连接" : "连接"}</Button>}<Button variant="danger" onClick={() => setDeleteOpen(true)} aria-label="删除服务器"><Trash2 size={14} /></Button></div>
+    <section className="home-page">
+      <div className="home-router">
+        <div className="home-router__tabs">
+          <button className="home-router__tab is-active" type="button">概览</button>
+        </div>
+        <div className="home-router__actions">
+          {online && <Button variant="ghost" onClick={() => setEditOpen(true)} aria-label="编辑服务器"><Pencil size={14} /></Button>}
+          {online && <Button variant="ghost" onClick={() => duplicate.mutate()} disabled={duplicate.isPending} aria-label="复制档案"><Copy size={14} /></Button>}
+          {online && <Button variant="ghost" onClick={() => disconnect.mutate()} disabled={disconnect.isPending} aria-label="断开连接"><LogOut size={14} /></Button>}
+          {!online && <Button variant="primary" onClick={() => connect.mutate()} disabled={connect.isPending || reconnect.isPending}><Power size={14} /> {connect.isPending || reconnect.isPending ? "连接中…" : connection.data?.status === "error" ? "重新连接" : "连接"}</Button>}
+          <Button variant="ghost" onClick={() => navigate(`/servers/${serverId}/terminal`)} aria-label="打开终端"><Terminal size={14} /></Button>
+          <Button variant="ghost" onClick={() => setDeleteOpen(true)} aria-label="删除服务器"><Trash2 size={14} /></Button>
+        </div>
       </div>
-      <nav className="workspace-tabs"><NavLink end to={`/servers/${serverId}`}>概览</NavLink><NavLink to={`/servers/${serverId}/files`}>文件</NavLink><NavLink to={`/servers/${serverId}/terminal`}>终端</NavLink><NavLink to={`/servers/${serverId}/operations`}>端口与进程</NavLink><NavLink to={`/servers/${serverId}/services`}>服务</NavLink><NavLink to={`/servers/${serverId}/tools`}>工具</NavLink><NavLink to={`/servers/${serverId}/logs`}>日志</NavLink><NavLink to={`/servers/${serverId}/nginx`}>Nginx</NavLink><NavLink to={`/servers/${serverId}/docker`}>Docker</NavLink></nav>
 
-      {!online && <div className="connect-panel"><div className="connect-panel__icon"><Network size={27} /></div><h2>{connection.data?.status === "error" ? "连接失败" : "建立安全 SSH 会话"}</h2><p>{connection.data?.error?.message ?? "连接后将从远程标准接口读取真实系统状态。首次连接需要核对服务器 Host Key 指纹。"}</p>{connection.data?.error?.suggestedAction && <div className="connection-suggestion">建议：{connection.data.error.suggestedAction}</div>}<Button variant="primary" onClick={() => (connection.data?.status === "error" ? reconnect.mutate() : connect.mutate())} disabled={connect.isPending || reconnect.isPending}>{connect.isPending || reconnect.isPending ? <RefreshCw className="spin" size={16} /> : <KeyRound size={16} />} {connect.isPending || reconnect.isPending ? "正在握手" : connection.data?.status === "error" ? "有限退避重连" : "连接"}</Button>{(connect.error || reconnect.error) && <div className="form-error">{errorMessage(connect.error ?? reconnect.error)}</div>}</div>}
+      {!online && <div className="connect-panel home-connect-panel"><div className="connect-panel__icon"><ShieldAlert size={27} /></div><h2>{connection.data?.status === "error" ? "连接失败" : "建立安全 SSH 会话"}</h2><p>{connection.data?.error?.message ?? "连接后将从远程标准接口读取真实系统状态。首次连接需要核对服务器 Host Key 指纹。"}</p><Button variant="primary" onClick={() => (connection.data?.status === "error" ? reconnect.mutate() : connect.mutate())} disabled={connect.isPending || reconnect.isPending}>{connect.isPending || reconnect.isPending ? <RefreshCw className="spin" size={16} /> : <Power size={16} />} {connect.isPending || reconnect.isPending ? "正在握手" : "连接"}</Button>{(connect.error || reconnect.error) && <div className="form-error">{errorMessage(connect.error ?? reconnect.error)}</div>}</div>}
       {duplicate.error && <div className="page-state page-state--error">{errorMessage(duplicate.error)}</div>}
 
-      {online && overview.isLoading && <div className="metrics-skeleton"><div /><div /><div /><div /></div>}
-      {online && overview.data && <OverviewContent serverId={serverId} data={overview.data} history={history.data ?? []} historyLoading={history.isLoading} historyHours={historyHours} onHistoryHoursChange={setHistoryHours} onServiceAction={(name, action) => setServiceTarget({ name, action })} onServiceLogs={(name) => logs.mutate(name)} />}
-      <OverviewMemoCard key={`${serverId}:${memo.data?.updatedAt ?? "empty"}`} initialValue={memo.data?.content ?? ""} updatedAt={memo.data?.updatedAt ?? null} loading={memo.isLoading} error={memo.error ? errorMessage(memo.error) : saveMemo.error ? errorMessage(saveMemo.error) : null} saving={saveMemo.isPending} onSave={(content) => saveMemo.mutate(content)} />
+      {online && !data && <div className="metrics-skeleton"><div /><div /><div /><div /></div>}
+      {online && data && (
+        <>
+          <div className="home-grid">
+            <div className="home-grid__left">
+              <QuickJumpCard items={quickJump} />
+              <SystemStatusCard data={data} />
+              <MonitorCard data={data} history={history.data ?? []} />
+            </div>
+            <div className="home-grid__right">
+              <DashboardCarousel data={data} memoQuery={memo} saveMemo={saveMemo} />
+              <AppLauncherCard serverId={serverId} data={data} onServiceAction={(name, action) => setServiceTarget({ name, action })} onServiceLogs={(name) => logs.mutate(name)} />
+            </div>
+          </div>
+          <footer className="home-footer"><span>Copyright © 2014-2026 飞致云</span><a href="https://fit2cloud.com/" target="_blank" rel="noreferrer">了解商业版</a><span className="home-footer__sep" /><a href="https://forum.fit2cloud.com/" target="_blank" rel="noreferrer">论坛求助</a><a href="https://www.fit2cloud.com/" target="_blank" rel="noreferrer">使用手册</a></footer>
+        </>
+      )}
 
       <Dialog.Root open={!!challenge} onOpenChange={(open) => !open && setChallenge(null)}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content dialog-content--narrow"><div className="hostkey-hero"><ShieldAlert size={30} /><span>首次连接</span></div><Dialog.Title>核对服务器身份</Dialog.Title><Dialog.Description>服务器返回了一个尚未信任的 Host Key。请通过可信渠道核对指纹后再继续。</Dialog.Description><dl className="fingerprint"><div><dt>主机</dt><dd>{challenge?.host}:{challenge?.port}</dd></div><div><dt>算法</dt><dd>{challenge?.keyType}</dd></div><div><dt>SHA256 指纹</dt><dd>{challenge?.fingerprint}</dd></div></dl><div className="dialog-actions"><Button variant="ghost" onClick={() => setChallenge(null)}>取消</Button><Button variant="primary" onClick={() => trust.mutate()} disabled={trust.isPending}>信任并连接</Button></div></Dialog.Content></Dialog.Portal></Dialog.Root>
       <ServerDialog key={`${server.updatedAt}:${editOpen}`} open={editOpen} onOpenChange={setEditOpen} profile={server} />
@@ -67,54 +98,244 @@ export function OverviewPage() {
   );
 }
 
-/** 展示 Overview 指标、运行时状态和可确认的 Docker/Nginx 服务操作。 */
-function OverviewContent({ serverId, data, history, historyLoading, historyHours, onHistoryHoursChange, onServiceAction, onServiceLogs }: { serverId: string; data: Awaited<ReturnType<typeof api.overview>>; history: Awaited<ReturnType<typeof api.metricHistory>>; historyLoading: boolean; historyHours: 1 | 6 | 24; onHistoryHoursChange: (value: 1 | 6 | 24) => void; onServiceAction: (name: string, action: "start" | "restart") => void; onServiceLogs: (name: string) => void }) {
+/** 概览统计卡：智能体 / 网站 / 数据库 - 所有 / 已安装应用，数字为快速跳转入口。 */
+function QuickJumpCard({ items }: { items: Array<{ name: string; count: number; to: string }> }) {
+  const navigate = useNavigate();
+  return (
+    <article className="home-card">
+      <div className="home-card__header"><span className="home-card__title">概览</span></div>
+      <div className="home-card__body">
+        <div className="home-quick">
+          {items.map((item) => <a key={item.name} className="home-quick__item" onClick={() => navigate(item.to)}><span>{item.name}</span><strong>{item.count}</strong></a>)}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+const ringColor = ["#7faef5", "#005eeb"];
+
+/** 负载 / CPU / 内存 / 磁盘四个环形状态图，与 web v-charts pie 比例一致。 */
+function MiniRing({ percent, title }: { percent: number; title: string }) {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const [whole, decimal] = String(clamped.toFixed(2)).split(".");
+  const option = {
+    animation: false,
+    title: [{
+      text: `{a|${whole}.}{b|${decimal || 0} %}`,
+      left: "34%", top: "32%",
+      textStyle: { rich: { a: { fontSize: 22 }, b: { fontSize: 14, padding: [5, 0, 0, 0] } }, color: "#303133", lineHeight: 25, fontWeight: 500 },
+      subtext: title, subtextStyle: { color: "#858a97", fontSize: 13 }, textAlign: "center",
+    }],
+    polar: { radius: ["71%", "80%"], center: ["50%", "50%"] },
+    angleAxis: { max: 100, show: false },
+    radiusAxis: { type: "category", show: false },
+    series: [
+      { type: "bar", roundCap: true, barWidth: 30, showBackground: true, coordinateSystem: "polar", backgroundStyle: { color: "#e5eefd" }, color: ringColor, label: { show: false }, data: [clamped] },
+      { type: "pie", radius: ["0%", "60%"], center: ["50%", "50%"], label: { show: false }, color: "#ffffff", data: [{ value: 0, itemStyle: { shadowColor: "rgba(0, 94, 235, 0.1)", shadowBlur: 5 } }] },
+    ],
+  };
+  return <ReactECharts option={option} opts={{ renderer: "canvas" }} style={{ height: 160, width: "100%" }} />;
+}
+
+/** 系统状态卡：运行流畅 / 核数 / 内存 / 磁盘四个环形图。 */
+function SystemStatusCard({ data }: { data: SystemOverview }) {
   const memoryUsed = data.memoryTotalBytes - data.memoryAvailableBytes;
-  return <><div className="overview-grid">
-    <article className="metric-card metric-card--accent"><div className="metric-card__top"><span>CPU 使用率</span><Cpu size={18} /></div><strong>{data.cpuUsagePercent?.toFixed(1) ?? "—"}<small>%</small></strong><div className="meter"><i style={{ width: `${data.cpuUsagePercent ?? 0}%` }} /></div><footer>{data.cpuModel} · {data.logicalCores} 核</footer></article>
-    <article className="metric-card"><div className="metric-card__top"><span>内存</span><MemoryStick size={18} /></div><strong>{formatBytes(memoryUsed)}<small> / {formatBytes(data.memoryTotalBytes)}</small></strong><div className="meter"><i style={{ width: `${(memoryUsed / data.memoryTotalBytes) * 100}%` }} /></div><footer>可用 {formatBytes(data.memoryAvailableBytes)}</footer></article>
-    <article className="metric-card"><div className="metric-card__top"><span>负载</span><Activity size={18} /></div><strong>{data.load[0].toFixed(2)}</strong><div className="load-values"><span>1 分钟</span><span>{data.load[1].toFixed(2)} / {data.load[2].toFixed(2)}</span></div><footer>运行 {formatDuration(data.uptimeSeconds)}</footer></article>
-    <article className="metric-card"><div className="metric-card__top"><span>根磁盘</span><HardDrive size={18} /></div><strong>{data.disks[0]?.usagePercent.toFixed(0) ?? "—"}<small>%</small></strong><div className="meter"><i style={{ width: `${data.disks[0]?.usagePercent ?? 0}%` }} /></div><footer>{data.disks[0] ? `${formatBytes(data.disks[0].usedBytes)} / ${formatBytes(data.disks[0].totalBytes)}` : "无数据"}</footer></article>
-    <article className="system-card"><div><span className="section-kicker">系统身份</span><h2>{data.hostname}</h2><p>{data.osName} {data.osVersion} · {data.currentUser}</p><div className="network-rate"><span>接收 {formatBytes(data.networkRxBytesPerSecond)}/秒</span><span>发送 {formatBytes(data.networkTxBytesPerSecond)}/秒</span></div></div><dl><div><dt>内核 / 架构</dt><dd>{data.kernel} · {data.architecture}</dd></div><div><dt>网络</dt><dd>{data.primaryIp || "—"} · 网关 {data.defaultGateway || "—"}</dd></div><div><dt>平台</dt><dd>{data.packageManager} · systemd {data.systemdRunning ? "运行中" : "异常"}</dd></div><div><dt>远端时间</dt><dd>{data.currentTime || "—"} {data.timezone}</dd></div></dl></article>
-    <article className="runtime-card"><div className="runtime-card__header"><span className="section-kicker">运行时</span><Box size={18} /></div><div className="runtime-row"><span className={`runtime-icon ${data.docker.running ? "ok" : ""}`}>D</span><div><strong>Docker</strong><small>{data.docker.installed ? data.docker.version ?? "已安装" : "未安装"}</small></div><em>{data.docker.running ? "运行中" : data.docker.installed ? "已停止" : "不可用"}</em></div><div className="runtime-row"><span className={`runtime-icon ${data.nginx.running ? "ok" : ""}`}>N</span><div><strong>Nginx</strong><small>{data.nginx.installed ? data.nginx.version ?? "已安装" : "未安装"}</small></div><em>{data.nginx.running ? "运行中" : data.nginx.installed ? "已停止" : "不可用"}</em></div>{data.systemdRunning && <div className="runtime-service-actions"><RuntimeServiceAction name="docker" installed={data.docker.installed} running={data.docker.running} onAction={onServiceAction} onLogs={onServiceLogs} /><RuntimeServiceAction name="nginx" installed={data.nginx.installed} running={data.nginx.running} onAction={onServiceAction} onLogs={onServiceLogs} /></div>}<div className="runtime-summary"><span>{data.listeningPorts} 个监听端口</span><span className={data.failedServices ? "warn" : ""}>{data.failedServices} 个异常服务</span></div></article><article className="system-card overview-detail-card"><div><span className="section-kicker">高占用进程</span><h2>资源占用</h2>{data.topProcesses.map((process) => <div className="overview-process" key={process.pid}><span className="mono">{process.pid}</span><strong>{process.name}</strong><span>{process.cpuPercent.toFixed(1)}% CPU · {process.memoryPercent.toFixed(1)}% 内存</span></div>)}</div><div><span className="section-kicker">挂载点</span>{data.mounts.slice(0, 8).map((mount) => <div className="overview-mount" key={`${mount.mount}:${mount.source}`}><strong className="mono">{mount.mount}</strong><small>{mount.source} · {mount.filesystem}</small></div>)}</div></article>
-  </div><RecommendationCards serverId={serverId} data={data} /><MetricHistoryCharts data={history} loading={historyLoading} hours={historyHours} onHoursChange={onHistoryHoursChange} /></>;
+  const loadPercent = data.logicalCores > 0 ? (data.load[0] / data.logicalCores) * 100 : 0;
+  const memoryPercent = data.memoryTotalBytes > 0 ? (memoryUsed / data.memoryTotalBytes) * 100 : 0;
+  const disk = data.disks[0];
+  const diskPercent = disk?.usagePercent ?? 0;
+  const loadLabel = data.load[0] < data.logicalCores * 0.7 ? "运行流畅" : "负载较高";
+  return (
+    <article className="home-card home-card--status">
+      <div className="home-card__header"><span className="home-card__title">状态</span></div>
+      <div className="home-card__body">
+        <div className="home-status">
+          <div className="home-status__item"><MiniRing percent={loadPercent} title="负载" /><span className="home-status__label">{loadLabel}</span></div>
+          <div className="home-status__item"><MiniRing percent={data.cpuUsagePercent ?? 0} title="CPU" /><span className="home-status__label">( {data.load[0].toFixed(2)} / {data.logicalCores} ) 核</span></div>
+          <div className="home-status__item"><MiniRing percent={memoryPercent} title="内存" /><span className="home-status__label">{formatBytes(memoryUsed)} / {formatBytes(data.memoryTotalBytes)}</span></div>
+          <div className="home-status__item"><MiniRing percent={diskPercent} title="磁盘" /><span className="home-status__label">{disk ? `${formatBytes(disk.usedBytes)} / ${formatBytes(disk.totalBytes)}` : "—"}</span></div>
+        </div>
+      </div>
+    </article>
+  );
 }
 
-/** Derives actionable Overview recommendations only from the current remote capability snapshot. */
-function RecommendationCards({ serverId, data }: { serverId: string; data: Awaited<ReturnType<typeof api.overview>> }) {
-  const cards = useMemo(() => {
-    const result: Array<{ title: string; detail: string; to?: string; tone: "info" | "warn" }> = [];
-    if (!data.docker.installed) result.push({ title: "安装 Docker", detail: "节点未发现 Docker，可在容器页生成安装计划。", to: `/servers/${serverId}/docker`, tone: "info" });
-    else if (!data.docker.running) result.push({ title: "启动 Docker", detail: "Docker 已安装但当前未运行，容器管理功能会不可用。", to: `/servers/${serverId}/services`, tone: "warn" });
-    const rootDisk = data.disks[0];
-    if (rootDisk && rootDisk.usagePercent >= 85) result.push({ title: "清理磁盘空间", detail: `${rootDisk.mount} 已使用 ${rootDisk.usagePercent.toFixed(0)}%，建议先检查日志和 Docker 镜像。`, to: `/servers/${serverId}/files`, tone: "warn" });
-    if (data.failedServices > 0) result.push({ title: "检查异常服务", detail: `systemd 报告 ${data.failedServices} 个失败服务，建议打开服务页查看日志。`, to: `/servers/${serverId}/services`, tone: "warn" });
-    if (!data.capabilities.ufw && !data.capabilities.firewalld && !data.capabilities.nft) result.push({ title: "配置防火墙", detail: "节点未探测到 UFW、firewalld 或 nft，可在安全页选择可用后端。", to: `/servers/${serverId}/security`, tone: "info" });
-    const permissionWarnings = (data.permissionDiagnostics ?? data.serverCapabilities.permissionDiagnostics ?? []).filter((item) => item.status !== "ok");
-    if (permissionWarnings.length > 0) result.push({ title: "检查管理权限", detail: `${permissionWarnings.length} 项远端管理能力受限，建议核对 sudo、目录或命令权限。`, to: `/servers/${serverId}/security`, tone: "warn" });
-    return result.slice(0, 4);
-  }, [data, serverId]);
-  const diagnostics = (data.permissionDiagnostics ?? data.serverCapabilities.permissionDiagnostics ?? []).slice(0, 12);
-  return <section className="overview-recommendations"><header><div><span className="section-kicker">基于实时探测</span><h2>推荐操作</h2></div><Lightbulb size={18} /></header>{cards.length ? <div className="overview-recommendation-grid">{cards.map((card) => <NavLink className={`overview-recommendation-card is-${card.tone}`} to={card.to ?? "#"} key={card.title}><span><strong>{card.title}</strong><small>{card.detail}</small></span><span className="overview-recommendation-card__arrow">→</span></NavLink>)}</div> : <div className="overview-recommendations__empty"><Lightbulb size={18} /><span>当前节点没有需要优先处理的异常项。</span></div>}{diagnostics.length > 0 && <div className="overview-permission-list"><div><span className="section-kicker">权限诊断</span><small>只读检查当前 SSH 用户是否具备后续管理动作所需的命令和目录访问权。</small></div>{diagnostics.map((item) => <span className={`status-chip ${item.status === "ok" ? "status-chip--ok" : "status-chip--warn"}`} key={item.scope}>{item.scope} · {item.detail}</span>)}</div>}</section>;
-}
-
-/** Edits one local server memo and keeps its content outside remote commands and audit records. */
-function OverviewMemoCard({ initialValue, updatedAt, loading, error, saving, onSave }: { initialValue: string; updatedAt: string | null; loading: boolean; error: string | null; saving: boolean; onSave: (value: string) => void }) {
-  const [value, setValue] = useState(initialValue);
-  return <section className="overview-memo-card"><header><div><span className="section-kicker"><StickyNote size={14} /> 本地备忘</span><h2>服务器备注</h2></div><span>{loading ? "读取中…" : updatedAt ? `更新于 ${new Date(updatedAt).toLocaleString()}` : "尚未保存"}</span></header><textarea maxLength={4000} value={value} onChange={(event) => setValue(event.target.value)} placeholder="记录部署目的、维护窗口、负责人或其他只保存在本机的备注…" rows={4} /><footer><small>{value.length} / 4000 · 仅保存在此客户端</small><Button size="sm" variant="primary" onClick={() => onSave(value)} disabled={saving || loading}>{saving ? "保存中…" : <><Save size={13} />保存备注</>}</Button></footer>{error && <div className="form-error">{error}</div>}</section>;
-}
-
-/** Renders bounded local metric history and a clear warm-up state before enough samples exist. */
-function MetricHistoryCharts({ data, loading, hours, onHoursChange }: { data: Awaited<ReturnType<typeof api.metricHistory>>; loading: boolean; hours: 1 | 6 | 24; onHoursChange: (value: 1 | 6 | 24) => void }) {
-  const points = useMemo(() => data.slice(-500), [data]);
+/** 监控卡：流量 / 磁盘 IO 切换 + 网卡筛选 + 实时标签 + 折线图。 */
+function MonitorCard({ data, history }: { data: SystemOverview; history: MetricSample[] }) {
+  const [mode, setMode] = useState<"network" | "io">("network");
+  const points = useMemo(() => history.slice(-20), [history]);
   const categories = points.map((sample) => new Date(sample.sampledAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-  const common = { animation: false, grid: { left: 42, right: 18, top: 20, bottom: 28 }, tooltip: { trigger: "axis" }, xAxis: { type: "category", boundaryGap: false, data: categories, axisLabel: { color: "#78908b", hideOverlap: true } }, yAxis: { type: "value", axisLabel: { color: "#78908b" }, splitLine: { lineStyle: { color: "rgba(120,144,139,.16)" } } } };
-  const chart = (title: string, series: Array<{ name: string; data: Array<number | null>; color: string }>, suffix = "") => ({ ...common, title: { text: title, left: 0, top: 0, textStyle: { color: "#dceae4", fontSize: 13, fontWeight: 600 } }, series: series.map((item) => ({ name: item.name, type: "line", smooth: true, showSymbol: false, data: item.data, lineStyle: { color: item.color, width: 2 }, itemStyle: { color: item.color }, areaStyle: { color: `${item.color}20` } })), tooltip: { trigger: "axis", valueFormatter: (value: number) => `${value}${suffix}` } });
-  return <section className="metric-history"><header><div><span className="section-kicker">本地历史</span><h2>资源趋势</h2><p>{loading ? "正在准备采样…" : points.length ? `已保存 ${points.length} 个采样点 · 最多展示 500 点` : "连接后每 5 秒采样一次，数据会逐步预热"}</p></div><div className="metric-history__range">{([1, 6, 24] as const).map((value) => <button key={value} className={hours === value ? "active" : ""} onClick={() => onHoursChange(value)}>{value} 小时</button>)}</div></header>{points.length ? <div className="metric-chart-grid"><ReactECharts option={chart("CPU 使用率", [{ name: "CPU", data: points.map((item) => item.cpuUsagePercent), color: "#8fd47b" }], "%")} opts={{ renderer: "svg" }} /><ReactECharts option={chart("内存使用率", [{ name: "内存", data: points.map((item) => item.memoryTotalBytes ? (item.memoryUsedBytes / item.memoryTotalBytes) * 100 : null), color: "#53b7a1" }], "%")} opts={{ renderer: "svg" }} /><ReactECharts option={chart("网络收发速率", [{ name: "接收", data: points.map((item) => item.networkRxBytesPerSecond), color: "#78aaf2" }, { name: "发送", data: points.map((item) => item.networkTxBytesPerSecond), color: "#d3a56e" }], " B/s")} opts={{ renderer: "svg" }} /><ReactECharts option={chart("磁盘使用率", [{ name: "磁盘", data: points.map((item) => item.diskUsagePercent), color: "#c48be8" }], "%")} opts={{ renderer: "svg" }} /></div> : <div className="metric-history__empty"><Activity size={20} /><strong>暂无历史数据</strong><span>保持服务器在线，Overview 成功采样后这里会出现趋势图。</span></div>}</section>;
+  const networkSeries = [
+    { name: "上行", data: points.map((item) => item.networkRxBytesPerSecond / 1024), color: "#005eeb" },
+    { name: "下行", data: points.map((item) => item.networkTxBytesPerSecond / 1024), color: "#7faef5" },
+  ];
+  const ioSeries = [
+    { name: "读取", data: points.map((item) => (item.ioReadBytesPerSecond ?? 0) / 1024 / 1024), color: "#005eeb" },
+    { name: "写入", data: points.map((item) => (item.ioWriteBytesPerSecond ?? 0) / 1024 / 1024), color: "#7faef5" },
+  ];
+  const chartOption = {
+    animation: false,
+    grid: { left: 65, right: 65, bottom: "20%", top: 40 },
+    legend: { top: 0, left: "center", textStyle: { color: "var(--text-soft)", fontSize: 12 } },
+    tooltip: { trigger: "axis" },
+    xAxis: { type: "category", boundaryGap: false, data: categories.length ? categories : Array.from({ length: 20 }, () => ""), axisLabel: { color: "var(--muted)", fontSize: 12 }, axisLine: { lineStyle: { color: "var(--line)" } } },
+    yAxis: { type: "value", axisLabel: { color: "var(--muted)", fontSize: 12 }, splitLine: { lineStyle: { color: "var(--line-soft)" } } },
+    series: [...(mode === "network" ? networkSeries : ioSeries)].map((item) => ({ name: item.name, type: "line", smooth: true, showSymbol: false, data: item.data, lineStyle: { color: item.color, width: 2 }, itemStyle: { color: item.color }, areaStyle: { color: `${item.color}18` } })),
+    dataZoom: [{ type: "inside" }],
+  };
+  const totalRx = data.networkRxBytesTotal ?? 0;
+  const totalTx = data.networkTxBytesTotal ?? 0;
+  return (
+    <article className="home-card home-card--monitor">
+      <div className="home-card__header">
+        <span className="home-card__title">监控</span>
+        <div className="home-card__header-right">
+          <div className="home-segmented">
+            <button className={mode === "network" ? "is-active" : ""} onClick={() => setMode("network")}>流量</button>
+            <button className={mode === "io" ? "is-active" : ""} onClick={() => setMode("io")}>磁盘 IO</button>
+          </div>
+          {mode === "network" ? (
+            <label className="home-select"><span>网卡</span><select value="所有" disabled><option>所有</option></select><ChevronDown size={13} /></label>
+          ) : (
+            <span className="home-select home-select--static"><span>磁盘</span><b>所有</b></span>
+          )}
+        </div>
+      </div>
+      <div className="home-card__body">
+        <div className="home-monitor__chart-wrap">
+          <div className="home-monitor__tags">
+            {mode === "network" ? (
+              <>
+                <span>上行: {formatBytes(data.networkRxBytesPerSecond)}/s</span>
+                <span>下行: {formatBytes(data.networkTxBytesPerSecond)}/s</span>
+                <span>总发送: {formatBytes(totalTx)}</span>
+                <span>总接收: {formatBytes(totalRx)}</span>
+              </>
+            ) : (
+              <>
+                <span>读取: {formatBytes(data.ioReadBytesPerSecond ?? 0)}/s</span>
+                <span>写入: {formatBytes(data.ioWriteBytesPerSecond ?? 0)}/s</span>
+                <span>读写速率: {data.ioCountPerSecond ?? 0} 次/s</span>
+                <span>延迟: {data.ioLatencyMs ?? 0} ms</span>
+              </>
+            )}
+          </div>
+          <ReactECharts option={chartOption} opts={{ renderer: "svg" }} style={{ height: 383 }} />
+        </div>
+      </div>
+    </article>
+  );
 }
 
-/** 为已安装运行时提供 start/restart 入口，实际动作由父级确认对话框提交。 */
-function RuntimeServiceAction({ name, installed, running, onAction, onLogs }: { name: string; installed: boolean; running: boolean; onAction: (name: string, action: "start" | "restart") => void; onLogs: (name: string) => void }) {
-  if (!installed) return null;
-  return <span className="runtime-service-action"><small>{name}</small><Button size="sm" variant="ghost" onClick={() => onAction(name, running ? "restart" : "start")}>{running ? "重启" : "启动"}</Button><Button size="sm" variant="ghost" onClick={() => onLogs(name)}><FileText size={12} /> 日志</Button></span>;
+/** 右侧系统信息/备忘录轮播；点击编辑时初始化草稿，查询刷新不覆盖输入。 */
+function DashboardCarousel({ data, memoQuery, saveMemo }: { data: SystemOverview; memoQuery: { data?: { content: string; updatedAt: string | null } | undefined; isLoading: boolean; error: unknown }; saveMemo: { mutate: (content: string) => void; isPending: boolean; error: unknown } }) {
+  const [index, setIndex] = useState(0);
+  const [showSensitive, setShowSensitive] = useState(true);
+  const [memoEditing, setMemoEditing] = useState(false);
+  const [memoDraft, setMemoDraft] = useState("");
+  useEffect(() => {
+    if (memoEditing) return;
+    const timer = setInterval(() => setIndex((current) => (current + 1) % 2), 5000);
+    return () => clearInterval(timer);
+  }, [memoEditing]);
+  const bootTime = new Date(new Date(data.currentTime).getTime() - data.uptimeSeconds * 1000).toLocaleString();
+  const rows: Array<[string, string]> = [
+    ["主机名称", showSensitive ? data.hostname : "****"],
+    ["发行版本", `${data.osName} ${data.osVersion}`.trim() || data.osName],
+    ["内核版本", data.kernel],
+    ["系统类型", data.architecture],
+    ["主机地址", showSensitive ? data.primaryIp : "****"],
+    ["启动时间", bootTime],
+    ["运行时间", formatDuration(data.uptimeSeconds)],
+  ];
+  return (
+    <div className="home-carousel">
+      {index === 0 && (
+        <article className="home-card home-carousel__card">
+          <div className="home-card__header">
+            <span className="home-card__title">系统信息</span>
+            <div className="home-card__header-right">
+              <button className="home-icon-btn" onClick={() => setShowSensitive((value) => !value)} aria-label="切换敏感信息">{showSensitive ? <Eye size={14} /> : <EyeOff size={14} />}</button>
+              <button className="home-icon-btn" onClick={() => window.navigator.clipboard?.writeText(rows.map(([label, value]) => `${label}: ${value}`).join("\n"))} aria-label="复制"><Copy size={14} /></button>
+            </div>
+          </div>
+          <div className="home-card__body home-carousel__body">
+            <table className="home-sysinfo">
+              <tbody>{rows.map(([label, value]) => <tr key={label}><td>{label}</td><td>{value}</td></tr>)}</tbody>
+            </table>
+          </div>
+        </article>
+      )}
+      {index === 1 && (
+        <article className="home-card home-carousel__card">
+          <div className="home-card__header">
+            <span className="home-card__title">备忘录</span>
+            <div className="home-card__header-right">
+              {!memoEditing && <button className="home-icon-btn" onClick={() => { setMemoDraft(memoQuery.data?.content ?? ""); setMemoEditing(true); }} aria-label="编辑备忘录"><Edit size={14} /></button>}
+              {memoEditing && <button className="home-icon-btn" onClick={() => { saveMemo.mutate(memoDraft); setMemoEditing(false); }} aria-label="保存"><Check size={14} /></button>}
+              {memoEditing && <button className="home-icon-btn" onClick={() => setMemoEditing(false)} aria-label="取消"><X size={14} /></button>}
+            </div>
+          </div>
+          <div className="home-card__body home-carousel__body">
+            {memoEditing ? (
+              <textarea className="home-memo-editor" maxLength={500} value={memoDraft} onChange={(event) => setMemoDraft(event.target.value)} placeholder="点击编辑按钮启用编辑" rows={9} />
+            ) : (
+              <p className="home-memo-content">{memoQuery.data?.content || "点击编辑按钮启用编辑"}</p>
+            )}
+            {!!(memoQuery.error || saveMemo.error) && <div className="form-error">{errorMessage(memoQuery.error ?? saveMemo.error)}</div>}
+          </div>
+        </article>
+      )}
+      <div className="home-carousel__indicator"><button className={index === 0 ? "is-active" : ""} aria-label="系统信息" onClick={() => setIndex(0)} /><button className={index === 1 ? "is-active" : ""} aria-label="备忘录" onClick={() => setIndex(1)} /></div>
+    </div>
+  );
+}
+
+/** 应用卡：已安装应用操作 + 推荐安装（对齐 web AppLauncher）。 */
+const LAUNCHER_APPS: Array<{ key: string; name: string; description: string }> = [
+  { key: "mysql", name: "MySQL", description: "开源关系型数据库" },
+  { key: "redis", name: "Redis", description: "高性能的开源键值数据库" },
+  { key: "deepseek-harness", name: "DeepSeek Harness", description: "DeepSeek 开源智能体开发环境" },
+  { key: "maxkb", name: "MaxKB", description: "强大易用的企业级智能体平台" },
+  { key: "openclaw", name: "OpenClaw", description: "开源、自托管的个人 AI 助理" },
+];
+
+function AppLauncherCard({ serverId, data, onServiceAction, onServiceLogs }: { serverId: string; data: SystemOverview; onServiceAction: (name: string, action: "start" | "stop" | "restart") => void; onServiceLogs: (name: string) => void }) {
+  const navigate = useNavigate();
+  return (
+    <article className="home-card home-card--apps">
+      <div className="home-card__header"><span className="home-card__title">应用</span></div>
+      <div className="home-card__body">
+        <div className="home-app-list">
+          {data.nginx.installed && (
+            <div className="home-app">
+              <div className="home-app__media">{data.nginx.version ? "N" : "?"}</div>
+              <div className="home-app__main">
+                <div className="home-app__title">openresty</div>
+                <div className="home-app__desc">版本: {data.nginx.version ?? "未知"}</div>
+                <div className="home-app__actions">
+                  <button className="home-app__action" onClick={() => onServiceAction("nginx", data.nginx.running ? "stop" : "start")}>{data.nginx.running ? "关闭" : "启动"}</button>
+                  <button className="home-app__action" onClick={() => onServiceAction("nginx", "restart")}>重启</button>
+                  <button className="home-app__action" onClick={() => navigate(`/servers/${serverId}/appstore`)}>更多</button>
+                  <button className="home-app__action" onClick={() => onServiceLogs("nginx")}><FileText size={12} />日志</button>
+                </div>
+              </div>
+              <button className="home-app__install" disabled={data.nginx.installed} onClick={() => navigate(`/servers/${serverId}/appstore`)}>安装</button>
+            </div>
+          )}
+          {LAUNCHER_APPS.map((app) => (
+            <div className="home-app" key={app.key}>
+              <div className="home-app__media">{app.name.charAt(0)}</div>
+              <div className="home-app__main">
+                <div className="home-app__title">{app.name}</div>
+                <div className="home-app__desc">{app.description}</div>
+              </div>
+              <button className="home-app__install" onClick={() => navigate(`/servers/${serverId}/appstore`)}>安装</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </article>
+  );
 }

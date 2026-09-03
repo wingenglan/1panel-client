@@ -1439,6 +1439,7 @@ engine mysql MySQL mysql 3306 "mysql mysqld"
 engine mariadb MariaDB mariadb 3306 "mariadb mysql"
 engine postgresql PostgreSQL psql 5432 "postgresql"
 engine redis Redis redis-cli 6379 "redis-server redis"
+engine mongodb MongoDB mongod 27017 "mongod"
 printf '__DATABASES__\n'
 if command -v mysql >/dev/null 2>&1; then mysql --batch --skip-column-names -e 'SELECT SCHEMA_NAME,DEFAULT_CHARACTER_SET_NAME,DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA' 2>/dev/null | while IFS='	' read -r name charset collation; do printf '__DB__\tmysql\t%s\t%s\t%s\t\n' "$name" "$charset" "$collation"; done; fi
 if command -v mariadb >/dev/null 2>&1; then mariadb --batch --skip-column-names -e 'SELECT SCHEMA_NAME,DEFAULT_CHARACTER_SET_NAME,DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA' 2>/dev/null | while IFS='	' read -r name charset collation; do printf '__DB__\tmariadb\t%s\t%s\t%s\t\n' "$name" "$charset" "$collation"; done; fi

@@ -40,6 +40,8 @@ pub struct WebsiteRecord {
 pub struct WebsiteSnapshot {
     pub supported: bool,
     pub managed_conf_dir: Option<String>,
+    /// OpenResty/Nginx 版本（如 1.31.1.1-0-noble），来自 `nginx -v`。
+    pub nginx_version: Option<String>,
     pub runtime_root: Option<String>,
     pub host_root: Option<String>,
     pub websites: Vec<WebsiteRecord>,
@@ -192,6 +194,16 @@ pub struct SaveWebsiteInput {
 pub struct WebsiteActionInput {
     pub server_id: String,
     pub domain: String,
+    pub action: String,
+    pub confirmed: bool,
+}
+
+/// 停止/启动/重启/重载 OpenResty 服务的用户输入；必须由用户显式确认。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NginxServiceInput {
+    pub server_id: String,
+    /// stop | start | restart | reload
     pub action: String,
     pub confirmed: bool,
 }
@@ -691,6 +703,7 @@ pub async fn snapshot(ssh: &SshConnectionManager, server_id: &str) -> AppResult<
         return Ok(WebsiteSnapshot {
             supported: false,
             managed_conf_dir: None,
+            nginx_version: nginx.version,
             runtime_root: nginx.container_site_root,
             host_root: nginx.site_host_root,
             websites: Vec::new(),
@@ -704,6 +717,7 @@ pub async fn snapshot(ssh: &SshConnectionManager, server_id: &str) -> AppResult<
         return Ok(WebsiteSnapshot {
             supported: false,
             managed_conf_dir: None,
+            nginx_version: nginx.version,
             runtime_root: nginx.container_site_root,
             host_root: nginx.site_host_root,
             websites: Vec::new(),
@@ -719,14 +733,12 @@ pub async fn snapshot(ssh: &SshConnectionManager, server_id: &str) -> AppResult<
             .details(error)
             .for_server(server_id)
     })?;
-    let mut websites = Vec::new();
+    let mut pending: Vec<(u64, String, WebsiteRecord, Vec<String>)> = Vec::new();
     let mut warnings = Vec::new();
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name();
-        if !(name.starts_with("site-")
-            && (name.ends_with(".conf") || name.ends_with(".conf.disabled")))
-        {
+        if !(name.ends_with(".conf") || name.ends_with(".conf.disabled")) {
             continue;
         }
         let mut file = match sftp.open(&path).await {
@@ -741,20 +753,51 @@ pub async fn snapshot(ssh: &SshConnectionManager, server_id: &str) -> AppResult<
             warnings.push(format!("无法读取网站配置：{path}（{error}）"));
             continue;
         }
-        match parse_website_config(
-            &String::from_utf8_lossy(&bytes),
-            &path,
-            !name.ends_with(".disabled"),
-        ) {
-            Some(website) => websites.push(website),
+        let content = String::from_utf8_lossy(&bytes);
+        match parse_website_config(&content, &path, !name.ends_with(".disabled")) {
+            Some(website) => {
+                // SFTP 连接宿主机，managed_conf_dir 为宿主机路径；网站根目录在其同级
+                // sites/{domain} 下。web 面板默认按创建时间降序（最新创建的网站在前），
+                // 目录 mtime 可作为创建顺序基准；取不到则退回配置文件 mtime。
+                let mut sort_key = u64::from(entry.metadata().mtime.unwrap_or(0));
+                if let Some(root) = nginx.site_host_root.as_deref() {
+                    let site_dir = format!("{root}/sites/{}", website.domain);
+                    if let Ok(meta) = sftp.metadata(&site_dir).await {
+                        if let Some(mtime) = meta.mtime {
+                            sort_key = u64::from(mtime);
+                        }
+                    }
+                }
+                pending.push((sort_key, name, website, included_rule_dirs(&content)));
+            }
             None => warnings.push(format!("无法解析网站配置：{path}")),
         }
     }
     let _ = sftp.close().await;
+    // 与 web 面板一致：按创建时间降序（最新创建的网站排最前）展示，
+    // 同时间戳再按域名升序保证顺序稳定。
+    let mut order: Vec<usize> = (0..pending.len()).collect();
+    order.sort_by(|&a, &b| {
+        pending[b]
+            .0
+            .cmp(&pending[a].0)
+            .then_with(|| pending[a].1.cmp(&pending[b].1))
+    });
+    let mut websites = Vec::with_capacity(pending.len());
+    let mut include_dirs = Vec::new();
+    for index in order {
+        let (_, _, website, dirs) = &pending[index];
+        websites.push(website.clone());
+        if !dirs.is_empty() {
+            include_dirs.push((websites.len() - 1, dirs.clone()));
+        }
+    }
+    enrich_included_rules(ssh, server_id, &nginx, &mut websites, include_dirs).await?;
     enrich_website_expiry(ssh, server_id, &nginx, &mut websites).await?;
     Ok(WebsiteSnapshot {
         supported: true,
         managed_conf_dir: Some(directory),
+        nginx_version: nginx.version,
         runtime_root: nginx.container_site_root,
         host_root: nginx.site_host_root,
         websites,
@@ -973,24 +1016,37 @@ pub async fn action(
         &input.domain,
     )?;
     let disabled_path = format!("{active_path}.disabled");
+    // 旧版客户端生成的配置是 site-{slug}.conf，一并处理保证历史站点可操作。
+    let legacy_path = format!(
+        "{}/site-{}.conf",
+        nginx.managed_conf_dir.as_deref().unwrap_or_default(),
+        domain_slug(&input.domain)
+    );
+    let legacy_disabled = format!("{legacy_path}.disabled");
     let control = nginx_control(&nginx);
     let command = match input.action.as_str() {
         "enable" => format!(
-            "test -f {disabled} && mv -- {disabled} {active}; {control} -t && {control} -s reload",
+            "test -f {disabled} && mv -- {disabled} {active}; test -f {legacy_disabled} && mv -- {legacy_disabled} {legacy}; {control} -t && {control} -s reload",
             disabled = crate::security::shell_escape(&disabled_path),
             active = crate::security::shell_escape(&active_path),
+            legacy_disabled = crate::security::shell_escape(&legacy_disabled),
+            legacy = crate::security::shell_escape(&legacy_path),
             control = control,
         ),
         "disable" => format!(
-            "test -f {active} && mv -- {active} {disabled}; {control} -t && {control} -s reload",
+            "test -f {active} && mv -- {active} {disabled}; test -f {legacy} && mv -- {legacy} {legacy_disabled}; {control} -t && {control} -s reload",
             active = crate::security::shell_escape(&active_path),
             disabled = crate::security::shell_escape(&disabled_path),
+            legacy = crate::security::shell_escape(&legacy_path),
+            legacy_disabled = crate::security::shell_escape(&legacy_disabled),
             control = control,
         ),
         "delete" => format!(
-            "rm -f -- {active} {disabled}; {control} -t && {control} -s reload",
+            "rm -f -- {active} {disabled} {legacy} {legacy_disabled}; {control} -t && {control} -s reload",
             active = crate::security::shell_escape(&active_path),
             disabled = crate::security::shell_escape(&disabled_path),
+            legacy = crate::security::shell_escape(&legacy_path),
+            legacy_disabled = crate::security::shell_escape(&legacy_disabled),
             control = control,
         ),
         _ => unreachable!(),
@@ -1006,6 +1062,87 @@ pub async fn action(
         );
     }
     snapshot(ssh, &input.server_id).await
+}
+
+/// 停止、启动、重启或重载 OpenResty（含容器场景），完成后重新探测状态。
+pub async fn nginx_service(
+    ssh: &SshConnectionManager,
+    input: NginxServiceInput,
+) -> AppResult<crate::domain::nginx::NginxSnapshot> {
+    if input.server_id.trim().is_empty() || input.action.trim().is_empty() {
+        return Err(AppError::new(
+            "INVALID_INPUT",
+            "website",
+            "缺少服务操作参数",
+        ));
+    }
+    if !matches!(
+        input.action.as_str(),
+        "stop" | "start" | "restart" | "reload"
+    ) {
+        return Err(AppError::new(
+            "INVALID_INPUT",
+            "website",
+            "不支持的服务操作",
+        ));
+    }
+    if !input.confirmed {
+        return Err(AppError::new(
+            "CONFIRMATION_REQUIRED",
+            "website",
+            "OpenResty 服务操作需要显式确认",
+        )
+        .for_server(&input.server_id));
+    }
+    let nginx = crate::domain::nginx::snapshot(ssh, &input.server_id).await?;
+    if !nginx.installed {
+        return Err(AppError::new(
+            "NGINX_NOT_INSTALLED",
+            "website",
+            "远端未安装 Nginx/OpenResty",
+        )
+        .for_server(&input.server_id));
+    }
+    let command = match nginx.container_id.as_deref() {
+        Some(container) => {
+            let id = crate::security::shell_escape(container);
+            match input.action.as_str() {
+                "stop" => format!("docker stop {id}"),
+                "start" => format!("docker start {id}"),
+                "restart" => format!("docker restart {id}"),
+                "reload" => format!("docker exec {id} openresty -s reload"),
+                _ => unreachable!(),
+            }
+        }
+        None => {
+            let flavor = crate::security::shell_escape(if nginx.flavor == "openresty" {
+                "openresty"
+            } else {
+                "nginx"
+            });
+            let binary = crate::security::shell_escape(nginx.binary.as_deref().unwrap_or("nginx"));
+            match input.action.as_str() {
+                "stop" => format!("systemctl stop {flavor} 2>/dev/null || {binary} -s quit"),
+                "start" => format!("systemctl start {flavor} 2>/dev/null || {binary}"),
+                "restart" => {
+                    format!("systemctl restart {flavor} 2>/dev/null || (test -f /run/nginx.pid && {binary} -s quit; {binary})")
+                }
+                "reload" => format!("{binary} -s reload"),
+                _ => unreachable!(),
+            }
+        }
+    };
+    let result = ssh
+        .execute_system(&input.server_id, &command, Duration::from_secs(90))
+        .await?;
+    if result.exit_code != 0 {
+        return Err(
+            AppError::new("NGINX_SERVICE_FAILED", "website", "OpenResty 服务操作失败")
+                .details(result.stderr)
+                .for_server(&input.server_id),
+        );
+    }
+    crate::domain::nginx::snapshot(ssh, &input.server_id).await
 }
 
 /// 确认 Nginx/OpenResty 已安装并拥有可写的受控 conf.d 目录。
@@ -1046,6 +1183,8 @@ fn nginx_control(nginx: &NginxSnapshot) -> String {
 }
 
 /// 计算受控网站配置文件路径，只允许由域名派生的安全文件名。
+/// web 面板使用 `{domain}.conf` 命名；旧版本客户端曾用 `site-{slug}.conf`，
+/// action 命令中对旧命名也做兼容。
 fn website_config_path(directory: &str, domain: &str) -> AppResult<String> {
     if directory.is_empty()
         || !directory.starts_with('/')
@@ -1059,7 +1198,14 @@ fn website_config_path(directory: &str, domain: &str) -> AppResult<String> {
             "网站配置目录无效",
         ));
     }
-    Ok(format!("{directory}/site-{}.conf", domain_slug(domain)))
+    if !valid_domain(domain) {
+        return Err(AppError::new(
+            "VALIDATION_FAILED",
+            "validation",
+            "网站域名无效",
+        ));
+    }
+    Ok(format!("{directory}/{domain}.conf"))
 }
 
 /// 为静态网站选择容器内运行时路径；宿主机 Nginx 默认使用 /var/www/sites。
@@ -1249,6 +1395,101 @@ async fn enrich_website_expiry(
                 .find_map(|line| line.trim().strip_prefix("notAfter="))
                 .map(str::to_string);
         }
+    }
+    Ok(())
+}
+
+/// 提取主配置 include 的规则目录（1Panel 将反向代理/SSL 规则拆分到
+/// /www/sites/{domain}/proxy|ssl/*.conf，主 server block 仅保留 include 引用）。
+fn included_rule_dirs(input: &str) -> Vec<String> {
+    let mut dirs = Vec::new();
+    for raw in input.lines() {
+        let line = raw.trim().trim_end_matches(';');
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if let ["include", value, ..] = fields.as_slice() {
+            if let Some(dir) = value.strip_suffix("/*.conf") {
+                dirs.push((*dir).to_string());
+            }
+        }
+    }
+    dirs
+}
+
+/// 补全 include 的规则文件信息：proxy 文件中的 proxy_pass 决定站点类型，
+/// ssl 文件中的 ssl_certificate 补齐证书路径，避免代理站点被误判为静态网站。
+async fn enrich_included_rules(
+    ssh: &SshConnectionManager,
+    server_id: &str,
+    nginx: &NginxSnapshot,
+    websites: &mut [WebsiteRecord],
+    include_dirs: Vec<(usize, Vec<String>)>,
+) -> AppResult<()> {
+    for (index, dirs) in include_dirs {
+        let Some(website) = websites.get_mut(index) else {
+            continue;
+        };
+        let sftp = ssh.open_sftp(server_id).await?;
+        for dir in dirs {
+            // 容器版 OpenResty 的 include 目标（如 /www/sites/...）对宿主机 SFTP
+            // 不可见，需按挂载映射换算成宿主机路径；失败时回退原路径再试一次。
+            let candidates: Vec<String> = {
+                let container_root = nginx.container_site_root.as_deref().unwrap_or_default();
+                let host_root = nginx.site_host_root.as_deref().unwrap_or_default();
+                if !container_root.is_empty()
+                    && !host_root.is_empty()
+                    && dir.starts_with(container_root)
+                {
+                    vec![
+                        format!("{host_root}{}", &dir[container_root.len()..]),
+                        dir.clone(),
+                    ]
+                } else {
+                    vec![dir.clone()]
+                }
+            };
+            let mut rules = Vec::new();
+            for candidate in &candidates {
+                let Ok(entries) = sftp.read_dir(candidate).await else {
+                    continue;
+                };
+                for entry in entries {
+                    let path = entry.path();
+                    let entry_name = path.rsplit('/').next().unwrap_or(path.as_str());
+                    if !entry_name.ends_with(".conf") {
+                        continue;
+                    }
+                    let Ok(mut file) = sftp.open(&path).await else {
+                        continue;
+                    };
+                    let mut bytes = Vec::new();
+                    if file.read_to_end(&mut bytes).await.is_err() {
+                        continue;
+                    }
+                    rules.push(String::from_utf8_lossy(&bytes).into_owned());
+                }
+                if !rules.is_empty() {
+                    break;
+                }
+            }
+            for text in rules {
+                for raw in text.lines() {
+                    let line = raw.trim().trim_end_matches(';');
+                    let fields: Vec<_> = line.split_whitespace().collect();
+                    match fields.as_slice() {
+                        ["proxy_pass", value, ..] => {
+                            website.kind = WebsiteKind::Proxy;
+                            website.upstream = Some((*value).to_string());
+                        }
+                        ["ssl_certificate", value, ..] => {
+                            website.ssl = true;
+                            website.certificate_path = Some((*value).to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let _ = sftp.close().await;
     }
     Ok(())
 }
@@ -1969,6 +2210,7 @@ mod tests {
         let snapshot = WebsiteSnapshot {
             supported: true,
             managed_conf_dir: Some("/etc/nginx/conf.d".into()),
+            nginx_version: Some("1.24.0".into()),
             runtime_root: Some("/www/sites".into()),
             host_root: Some("/opt/1panel/apps/openresty/www/sites".into()),
             websites: vec![

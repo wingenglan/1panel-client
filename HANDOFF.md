@@ -1,6 +1,6 @@
 # 1Panel Client 交接入口
 
-最后更新：2026-08-22（Asia/Shanghai）
+最后更新：2026-08-28（Asia/Shanghai）
 
 当前版本：`0.1.0`。项目从 `server-manager` 的真实 SSH/SFTP/Tauri 能力内核派生，产品壳与导航按 1Panel 社区版 v2.2.5 重建，并新增客户端特有的多服务器节点切换器。网站、安全、数据库、计划任务和高级探活已落到真实远端命令；完整覆盖范围见功能矩阵。
 
@@ -40,7 +40,7 @@
   - 系统-存储：读取真实 lsblk 后自动汇总块设备拓扑（磁盘/分区/RAID 阵列/LVM 卷/其他设备计数），在磁盘页顶部展示摘要；后端新增 `StorageTopology` 与 `compute_topology`，并补充单测。
   - 数据库权限矩阵安全诊断扩展为按引擎区分：MySQL/MariaDB 的 Grant Option（可继续授权）、PostgreSQL 的跨库 CREATE（创建范围过广）；并修复前端权限面板，让诊断列表在任意权限矩阵下始终展示（此前只在无权限条目时显示）。
   - 网站：静态站点支持填写「容器内 PHP socket」覆盖自动探测，用于容器化 OpenResty 无法直连宿主机 PHP-FPM socket 的场景；后端校验后直接生成 `fastcgi_pass`，仅允许静态站点。
-  - 网站证书批量策略（部分完成）：后端已新增 `certificate_renewal_plan`（按到期天数识别缺失/即将到期的启用 HTTPS 站点）及单测；已注册 IPC `get_certificate_renewal_plan`，前端已接入类型、API 与「证书批量策略」面板 JSX，但**面板 CSS 尚未补充，也未做视觉/真实连接验收**，见 `docs/NEXT_STEPS.md` 第一条。
+  - 网站证书批量策略（已完成并真实运行验收）：后端 `certificate_renewal_plan`（按到期天数识别缺失/即将到期的启用 HTTPS 站点）及单测；IPC `get_certificate_renewal_plan`；前端「证书批量策略」面板 CSS 完成，空态（阈值之上/无 HTTPS 站点）、阈值输入（1-365 钳制）、行内申请/续期按钮与 1Panel 证书页语义对齐；面板仅在存在已启用 HTTPS 受控站点时展示，阈值变化实时重新规划，站点增删/证书变更后按 key 失效重取。验收细节见「本次验证」与 `docs/ACCEPTANCE.md`。
 
 ## 本次验证
 
@@ -52,7 +52,7 @@
 - `pnpm tauri build`：本轮通过，已生成 Windows x64 MSI/NSIS；release 使用 NASM 3.02。
 - `.github/workflows/package.yml`：已配置 tag/手动触发的 Linux x64、macOS 和 Windows x64 Tauri bundle 矩阵；Linux 依赖与 Windows NASM 会在 runner 自动安装，跨平台产物尚未在本机执行。
 - 本地浏览器视觉验收：展开/折叠侧栏、空节点首屏、节点切换器和 720px 高度布局通过；控制台无 error/warn。
-- 未完成/未验证：本轮新增的「网站证书批量策略」前端面板已接 JSX 但 **CSS 尚未补充**，且未进行桌面应用真实启动与连接验收；此项目已列入 `docs/NEXT_STEPS.md` 第一条，不视为完成。
+- 桌面应用真实运行验收（2026-08-28，`pnpm tauri dev` + 测试服务器）：通过 UI 创建受控 HTTPS 静态站点 `renew-panel-test.wingeng.xyz`（临时自签证书，到期 2026-09-22），「证书批量策略」面板出现真实行（域名/即将到期/到期时间/续期）；提前续期天数 30→行、10→空态（面板与输入框保留）、365→行；窗口截图确认面板排版、徽标与按钮样式正常；随后 UI 删除站点，站点卡片与面板消失、受控站点恢复 0；SSH 核对 conf.d 无残留、证书目录已删除、`openresty -t` 通过；临时资源闭环，无业务数据残留。1Panel 面板对照组：浏览器打开已登录面板，对照网站（表格列 名称/类型/网站目录/状态/协议/过期时间/证书过期时间/操作=配置|更多）与证书页（域名/申请方式/状态/自动续签/过期时间/操作=详情|申请|编辑|更多），确认徽标、到期时间与行内轻量操作按钮约定一致，无需调整代码。
 
 NASM 已安装在 `C:\Users\dd\AppData\Local\Programs\NASM\3.02\nasm-3.02`。Windows Rust/release 命令需在 Visual Studio 2022 Developer Command Prompt 中，并将该目录加入当前进程 `PATH`。
 
@@ -64,8 +64,8 @@ NASM 已安装在 `C:\Users\dd\AppData\Local\Programs\NASM\3.02\nasm-3.02`。Win
 
 ## 下一步
 
-1. 完成「网站证书批量策略」的收尾：补充 `certificate-renewal-panel` 相关 CSS，跑一次全量门禁，然后按本文件下方「大阶段视觉验收」流程用桌面应用真实操作验收。
-2. 按 `docs/FUNCTION_MATRIX.md` 继续补齐跨客户端账号映射、更多对象存储协议与计划任务容灾，再推进更多第三方 CRS/签名规则源与策略编排、数据库权限模型差异诊断、AI 更多工具编排和真实第三方 MCP 兼容性，以及日志审计字段完全对齐与完整国际化。
+1. 「网站证书批量策略」已完成收尾（CSS、全量门禁、桌面应用真实运行验收与 1Panel 对照），见 `docs/ACCEPTANCE.md`。
+2. 按 `docs/FUNCTION_MATRIX.md` 继续补齐跨客户端账号映射、更多对象存储协议与计划任务容灾，再推进更多第三方 CRS/签名规则源与策略编排、数据库权限模型差异诊断、AI 更多工具编排和真实第三方 MCP 兼容性，以及日志审计字段完全对齐与完整国际化（WAF/告警、应用编排、数据库、AI 等大阶段各自完成后仍需按下方「大阶段视觉验收」流程执行）。
 
 ## 测试环境
 

@@ -135,7 +135,7 @@ impl LocalRepository {
         let memory_used = overview
             .memory_total_bytes
             .saturating_sub(overview.memory_available_bytes);
-        sqlx::query("INSERT INTO metric_samples (server_id,sampled_at,cpu_usage_percent,memory_used_bytes,memory_total_bytes,load_one,network_rx_bytes_per_second,network_tx_bytes_per_second,disk_usage_percent) VALUES (?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO metric_samples (server_id,sampled_at,cpu_usage_percent,memory_used_bytes,memory_total_bytes,load_one,network_rx_bytes_per_second,network_tx_bytes_per_second,io_read_bytes_per_second,io_write_bytes_per_second,disk_usage_percent) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
             .bind(server_id)
             .bind(&overview.sampled_at)
             .bind(overview.cpu_usage_percent)
@@ -144,6 +144,8 @@ impl LocalRepository {
             .bind(overview.load[0])
             .bind(i64::try_from(overview.network_rx_bytes_per_second).unwrap_or(i64::MAX))
             .bind(i64::try_from(overview.network_tx_bytes_per_second).unwrap_or(i64::MAX))
+            .bind(i64::try_from(overview.io_read_bytes_per_second).unwrap_or(i64::MAX))
+            .bind(i64::try_from(overview.io_write_bytes_per_second).unwrap_or(i64::MAX))
             .bind(overview.disks.first().map(|disk| disk.usage_percent))
             .execute(&self.pool)
             .await
@@ -171,7 +173,7 @@ impl LocalRepository {
         since: DateTime<Utc>,
         limit: u32,
     ) -> AppResult<Vec<MetricSample>> {
-        sqlx::query_as::<_, MetricSample>("SELECT sampled_at,cpu_usage_percent,memory_used_bytes,memory_total_bytes,load_one,network_rx_bytes_per_second,network_tx_bytes_per_second,disk_usage_percent FROM metric_samples WHERE server_id=? AND sampled_at >= ? ORDER BY sampled_at ASC LIMIT ?")
+        sqlx::query_as::<_, MetricSample>("SELECT sampled_at,cpu_usage_percent,memory_used_bytes,memory_total_bytes,load_one,network_rx_bytes_per_second,network_tx_bytes_per_second,io_read_bytes_per_second,io_write_bytes_per_second,disk_usage_percent FROM metric_samples WHERE server_id=? AND sampled_at >= ? ORDER BY sampled_at ASC LIMIT ?")
             .bind(server_id)
             .bind(since)
             .bind(i64::from(limit.clamp(1, 500)))
@@ -530,6 +532,8 @@ pub struct MetricSample {
     pub load_one: f64,
     pub network_rx_bytes_per_second: i64,
     pub network_tx_bytes_per_second: i64,
+    pub io_read_bytes_per_second: i64,
+    pub io_write_bytes_per_second: i64,
     pub disk_usage_percent: Option<f64>,
 }
 

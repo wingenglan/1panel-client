@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, LockKeyhole, Plus, RefreshCw, Save, Shield, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { NavLink, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { api } from "../../lib/api";
 import { errorMessage } from "../../lib/errors";
@@ -69,8 +69,7 @@ export function SecurityPage() {
   };
 
   return <section className="security-page">
-    <div className="workspace-header"><div><div className="breadcrumb">服务器 / <span>安全</span></div><h1>安全</h1><p>防火墙规则、SSH 登录策略与远程变更保护</p></div><div className="workspace-header__actions"><Button variant="secondary" onClick={() => security.refetch()} disabled={security.isFetching}><RefreshCw size={14} className={security.isFetching ? "spin" : ""} /> 刷新安全状态</Button></div></div>
-    <nav className="workspace-tabs"><NavLink to={`/servers/${serverId}`}>概览</NavLink><NavLink to={`/servers/${serverId}/operations`}>系统</NavLink><NavLink className="active" to={`/servers/${serverId}/security`}>安全</NavLink><NavLink to={`/servers/${serverId}/services`}>服务</NavLink><NavLink to={`/servers/${serverId}/logs`}>日志</NavLink></nav>
+    <div className="page-toolbar"><Button variant="secondary" onClick={() => security.refetch()} disabled={security.isFetching}><RefreshCw size={14} className={security.isFetching ? "spin" : ""} /> 刷新安全状态</Button></div>
     {security.isLoading && <div className="page-state">正在读取防火墙和 SSH 配置…</div>}
     {security.error && <div className="page-state page-state--error">{errorMessage(security.error)}</div>}
     {security.data && <>

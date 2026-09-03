@@ -2,7 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Activity, CircleStop, FileText, HardDrive, Info, Play, RefreshCw, RotateCw, Search, ServerCog, ShieldAlert, Waypoints } from "lucide-react";
 import { useMemo, useState } from "react";
-import { NavLink, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { api } from "../../lib/api";
 import { errorMessage } from "../../lib/errors";
@@ -37,8 +37,7 @@ export function OperationsPage() {
   const filtered = useMemo(() => filterSnapshot(operations.data, query), [operations.data, query]);
 
   return <section className="operations-page">
-    <div className="workspace-header terminal-header"><div><div className="breadcrumb">服务器 / {profile.data?.name ?? "…"} / <span>端口与进程</span></div><h1>运行现场</h1><p>进程、监听端口与 systemd 服务状态</p></div><div className="workspace-header__actions">{profile.data?.sudoMode !== "none" && <label className="scan-toggle"><input type="checkbox" checked={privilegedScan} onChange={(event) => setPrivilegedScan(event.target.checked)} /> sudo 重扫</label>}<Button variant="secondary" onClick={() => operations.refetch()} disabled={operations.isFetching}><RefreshCw className={operations.isFetching ? "spin" : ""} size={14} /> 重新扫描</Button></div></div>
-    <nav className="workspace-tabs"><NavLink end to={`/servers/${serverId}`}>概览</NavLink><NavLink to={`/servers/${serverId}/files`}>文件</NavLink><NavLink to={`/servers/${serverId}/terminal`}>终端</NavLink><NavLink className="active" to={`/servers/${serverId}/operations`}>端口与进程</NavLink><NavLink to={`/servers/${serverId}/services`}>服务</NavLink><NavLink to={`/servers/${serverId}/tools`}>工具</NavLink><NavLink to={`/servers/${serverId}/logs`}>日志</NavLink><NavLink to={`/servers/${serverId}/nginx`}>Nginx</NavLink><NavLink to={`/servers/${serverId}/docker`}>Docker</NavLink></nav>
+    <div className="page-toolbar">{profile.data?.sudoMode !== "none" && <label className="scan-toggle"><input type="checkbox" checked={privilegedScan} onChange={(event) => setPrivilegedScan(event.target.checked)} /> sudo 重扫</label>}<Button variant="secondary" onClick={() => operations.refetch()} disabled={operations.isFetching}><RefreshCw className={operations.isFetching ? "spin" : ""} size={14} /> 重新扫描</Button></div>
     <div className="operations-toolbar"><label><Search size={16} /><input autoFocus={view !== "storage"} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 8080、node、nginx、PID 或 service" /></label><div>{(["all", "ports", "processes", "services", "storage"] as View[]).map((value) => <button key={value} className={view === value ? "active" : ""} onClick={() => setView(value)}>{({ all: "全部", ports: "监听端口", processes: "进程", services: "服务", storage: "磁盘与挂载" })[value]}</button>)}</div></div>
     {operations.isLoading && <div className="page-state">正在从 ps、ss/lsof 与 systemd 读取真实状态…</div>}
     {operations.error && <div className="operation-error-panel"><Info size={19} /><div><strong>运行现场读取失败</strong><p>{errorMessage(operations.error)}。请确认 SSH 会话仍在线后重新扫描。</p></div><Button size="sm" variant="secondary" onClick={() => operations.refetch()}>重新扫描</Button></div>}

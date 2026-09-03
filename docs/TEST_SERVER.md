@@ -18,10 +18,10 @@
 
 | 字段 | 值 |
 |---|---|
-| 地址 | https://panel.wingeng.xyz/ |
+| 地址 | http://8.138.151.118:28085/8fefacfdc6 |
 | 用户名 | `root` |
 | 密码 | `@Wingeng1218` |
-| 说明 | 已登录；用于对标 1Panel 社区版 UI 与操作流程 |
+| 说明 | 已登录；用于对标 1Panel 社区版 UI 与操作流程。注意：面板启用了安全入口（`/8fefacfdc6`），**必须用 HTTP**（HTTPS 在 28085 端口不可用）；入口变化时在测试服务器上运行 `1pctl user-info` 获取最新地址。`https://panel.wingeng.xyz/` 仅显示安全入口提示页。 |
 
 ## 使用约定
 

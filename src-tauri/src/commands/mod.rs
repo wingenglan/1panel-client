@@ -541,10 +541,14 @@ pub async fn open_terminal(
     server_id: String,
     columns: u32,
     rows: u32,
+    command: Option<String>,
     on_event: Channel<crate::domain::ssh::TerminalEvent>,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    let (terminal_id, mut events) = state.ssh.open_terminal(&server_id, columns, rows).await?;
+    let (terminal_id, mut events) = state
+        .ssh
+        .open_terminal(&server_id, columns, rows, command)
+        .await?;
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
             if on_event.send(event).is_err() {
@@ -1342,6 +1346,28 @@ pub async fn docker_resource_action(
 
 /// 执行已确认的 Docker 镜像删除，并记录不含镜像输出的本地审计事件。
 #[tauri::command]
+pub async fn docker_prune(
+    input: crate::domain::docker::DockerPruneInput,
+    state: State<'_, AppState>,
+) -> AppResult<crate::domain::docker::DockerPruneResult> {
+    let server_id = input.server_id.clone();
+    let kind = input.kind.clone();
+    let result = crate::domain::docker::docker_prune(&state.ssh, input).await;
+    audit_outcome(
+        &state,
+        Some(&server_id),
+        "docker_prune",
+        "docker_prune",
+        Some(&kind),
+        &result,
+        format!("Docker 释放：{kind}"),
+    )
+    .await;
+    result
+}
+
+/// 执行已确认的 Docker 镜像删除，并记录不含镜像输出的本地审计事件。
+#[tauri::command]
 pub async fn docker_image_action(
     input: crate::domain::docker::DockerImageActionInput,
     state: State<'_, AppState>,
@@ -1394,6 +1420,28 @@ pub async fn docker_compose_action(
     result
 }
 
+/// 创建 Compose 项目：写 compose.yaml 并启动，目录已存在同名文件时拒绝。
+#[tauri::command]
+pub async fn docker_compose_create(
+    input: crate::domain::docker::DockerComposeCreateInput,
+    state: State<'_, AppState>,
+) -> AppResult<crate::domain::docker::DockerResourceActionResult> {
+    let server_id = input.server_id.clone();
+    let name = input.name.clone();
+    let result = crate::domain::docker::compose_create(&state.ssh, input).await;
+    audit_outcome(
+        &state,
+        Some(&server_id),
+        "docker_compose_create",
+        "docker_compose",
+        Some(&name),
+        &result,
+        format!("创建 Compose 项目：{}", name),
+    )
+    .await;
+    result
+}
+
 /// 保存 Compose 原始 YAML，先执行 `docker compose config -q`，失败时自动恢复备份。
 #[tauri::command]
 pub async fn docker_compose_save_yaml(
@@ -1425,14 +1473,17 @@ pub async fn docker_compose_details(
     sudo: bool,
     state: State<'_, AppState>,
 ) -> AppResult<crate::domain::docker::DockerComposeDetails> {
-    crate::domain::docker::compose_details(
+    // Box 整个域调用：其内部 tokio::join! 会把 8 路 SSH 状态机内联进协程对象，
+    // 该对象由 Tauri 在 IPC 线程构造，尺寸超过主线默认 1MiB 栈直接溢出。
+    let result = Box::pin(crate::domain::docker::compose_details(
         &state.ssh,
         &server_id,
         &project,
         working_dir.as_deref(),
         sudo,
-    )
-    .await
+    ))
+    .await;
+    result
 }
 
 /// 读取 Compose 项目或单个服务的最近日志，不保存日志内容。
@@ -2231,6 +2282,26 @@ pub async fn save_website(
         Some(&input.domain),
         &result,
         format!("保存网站：{}", input.domain),
+    )
+    .await;
+    result
+}
+
+/// 停止、启动、重启或重载 OpenResty 服务（需显式确认）。
+#[tauri::command]
+pub async fn website_nginx_service(
+    input: crate::domain::website::NginxServiceInput,
+    state: State<'_, AppState>,
+) -> AppResult<crate::domain::nginx::NginxSnapshot> {
+    let result = crate::domain::website::nginx_service(&state.ssh, input.clone()).await;
+    audit_outcome(
+        &state,
+        Some(&input.server_id),
+        &format!("website_nginx_{}", input.action),
+        "website",
+        None,
+        &result,
+        format!("OpenResty 服务操作：{}", input.action),
     )
     .await;
     result

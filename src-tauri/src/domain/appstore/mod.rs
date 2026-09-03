@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+mod catalog_meta;
+
 const REPOSITORY: &str = "1Panel-dev/appstore";
 const BRANCH: &str = "dev";
 const API_BASE: &str = "https://api.github.com";
@@ -205,6 +207,12 @@ pub struct InstalledApp {
     pub compose_path: String,
     pub project: String,
     pub status: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub host_ports: Vec<String>,
+    #[serde(default)]
+    pub installed_seconds: Option<u64>,
 }
 
 /// 返回远端已安装应用和 Docker Compose 能力状态。
@@ -838,12 +846,21 @@ async fn fetch_catalog(
     let mut items = entries
         .into_iter()
         .filter(|entry| entry.entry_type == "dir" && valid_key(&entry.name))
-        .map(|entry| AppCatalogItem {
-            key: entry.name.clone(),
-            name: display_name(&entry.name),
-            description: "官方 1Panel 应用模板".into(),
-            category: category_for(&entry.name).into(),
-            metadata_url: format!("{RAW_BASE}/apps/{}/data.yml", entry.name),
+        .map(|entry| {
+            let meta = catalog_meta::for_key(&entry.name);
+            AppCatalogItem {
+                key: entry.name.clone(),
+                name: meta
+                    .map(|value| value.name.into())
+                    .unwrap_or_else(|| display_name(&entry.name)),
+                description: meta
+                    .map(|value| value.description.into())
+                    .unwrap_or_else(|| description_for(&entry.name).into()),
+                category: meta
+                    .map(|value| value.category.into())
+                    .unwrap_or_else(|| category_for(&entry.name).into()),
+                metadata_url: format!("{RAW_BASE}/apps/{}/data.yml", entry.name),
+            }
         })
         .collect::<Vec<_>>();
     items.sort_by_key(|item| item.name.to_lowercase());
@@ -1450,7 +1467,7 @@ compose=''
 if docker compose version >/dev/null 2>&1; then compose='docker compose'; elif command -v docker-compose >/dev/null 2>&1; then compose='docker-compose'; fi
 printf '__COMPOSE__\t%s\n' "$compose"
 find /opt/1panel/apps -mindepth 3 -maxdepth 3 -type f -name docker-compose.yml -print 2>/dev/null | while IFS= read -r compose_path; do
-  path=${compose_path%/docker-compose.yml}; project=$(basename "$path"); key=$(basename "$(dirname "$path")"); status='unknown'; if [ -n "$compose" ]; then status=$($compose -f "$compose_path" -p "$project" ps --format '{{.State}}' 2>/dev/null | head -n 1); fi; printf '__APP__\t%s\t%s\t%s\t%s\n' "$key" "$path" "$compose_path" "$status";
+  path=${compose_path%/docker-compose.yml}; project=$(basename "$path"); key=$(basename "$(dirname "$path")"); status='unknown'; details=''; compose_ports=''; env_ports=''; if [ -n "$compose" ]; then status=$($compose -f "$compose_path" -p "$project" ps --format '{{.State}}' 2>/dev/null | head -n 1); ids=$($compose -f "$compose_path" -p "$project" ps -q 2>/dev/null); if [ -n "$ids" ]; then details=$(docker inspect --format '{{.Config.Image}}|{{.Created}}|{{json .NetworkSettings.Ports}}|{{.HostConfig.NetworkMode}}|{{json .Config.ExposedPorts}}' $ids 2>/dev/null | tr '\n' ';'); fi; fi; [ -f "$compose_path" ] && compose_ports=$(grep -oE '^[[:space:]]*-[[:space:]]*"?[0-9]{1,5}:[0-9]{1,5}' "$compose_path" 2>/dev/null | grep -oE '[0-9]{1,5}:[0-9]{1,5}' | cut -d: -f1 | sort -n -u | tr '\n' ' ' | sed 's/[[:space:]]*$//' ); env_ports=$(grep -oE '^PANEL_APP_PORT[A-Z_]*=[0-9]+' "$path/.env" 2>/dev/null | cut -d= -f2 | sort -n -u | tr '\n' ' ' | sed 's/[[:space:]]*$//' ); printf '__APP__\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$key" "$path" "$compose_path" "$status" "$details" "$compose_ports" "$env_ports";
 done"#;
     let result = ssh
         .execute_system(server_id, command, Duration::from_secs(45))
@@ -2052,13 +2069,43 @@ fn parse_installed(output: &str) -> Option<InstalledAppsSnapshot> {
             Some("__COMPOSE__") => {
                 compose_available = fields.get(1).is_some_and(|value| !value.is_empty())
             }
-            Some("__APP__") if fields.len() >= 5 => apps.push(InstalledApp {
-                key: fields[1].into(),
-                path: fields[2].into(),
-                compose_path: fields[3].into(),
-                project: fields[2].rsplit('/').next().unwrap_or_default().into(),
-                status: fields[4].into(),
-            }),
+            Some("__APP__") if fields.len() >= 5 => {
+                let (version, mut host_ports, installed_seconds, exposed_ports) = fields
+                    .get(5)
+                    .map(|raw| parse_app_details(raw))
+                    .unwrap_or_default();
+                // 容器运行在 host 网络或 inspect 无端口映射时（NetworkSettings.Ports 为空），
+                // 回退到 Compose 模板的 ports 段，与 Web 端安装记录中的端口一致。
+                if host_ports.is_empty() {
+                    host_ports = fields
+                        .get(6)
+                        .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+                        .unwrap_or_default();
+                }
+                // 模板未声明 ports 段（如 openresty 的 host 网络部署）时，
+                // 读取安装目录 `.env` 中面板写入的 PANEL_APP_PORT_HTTP/HTTPS 安装参数
+                // （与 Web 端安装记录中的端口一致），仅窃取端口数字、不回传环境变量原文。
+                if host_ports.is_empty() {
+                    host_ports = fields
+                        .get(7)
+                        .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+                        .unwrap_or_default();
+                }
+                // 以上来源均缺失时，按镜像声明的 ExposedPorts 兜底进端口列表。
+                if host_ports.is_empty() {
+                    host_ports = exposed_ports;
+                }
+                apps.push(InstalledApp {
+                    key: fields[1].into(),
+                    path: fields[2].into(),
+                    compose_path: fields[3].into(),
+                    project: fields[2].rsplit('/').next().unwrap_or_default().into(),
+                    status: fields[4].into(),
+                    version,
+                    host_ports,
+                    installed_seconds,
+                });
+            }
             _ => {}
         }
     }
@@ -2070,6 +2117,124 @@ fn parse_installed(output: &str) -> Option<InstalledAppsSnapshot> {
         apps,
         fetched_at: Utc::now(),
     })
+}
+
+/// 解析 inspect 摘要 `image|created|ports-json|network-mode|exposed-json`（多个容器以 `;`
+/// 分隔后逐段解析），提取版本、宿主端口、创建时间与 host 网络下镜像声明的端口；空段直接跳过。
+fn parse_app_details(raw: &str) -> (Option<String>, Vec<String>, Option<u64>, Vec<String>) {
+    let mut version = None;
+    let mut host_ports = Vec::new();
+    let mut installed_seconds = None;
+    let mut exposed_ports = Vec::new();
+    let mut all_host_network = true;
+    for segment in raw.split(';') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let mut parts = segment.splitn(5, '|');
+        let image = parts.next().unwrap_or("").trim();
+        let created = parts.next().unwrap_or("").trim();
+        let ports = parts.next().unwrap_or("").trim();
+        let network_mode = parts.next().unwrap_or("").trim();
+        let exposed = parts.next().unwrap_or("").trim();
+        if version.is_none() {
+            version = image_version(image);
+        }
+        host_ports.extend(parse_host_ports(ports));
+        if installed_seconds.is_none() {
+            installed_seconds = parse_installed_seconds(created);
+        }
+        // 仅当所有容器都运行在 host 网络时才启用 ExposedPorts 兜底：
+        // 桥接网络下容器端口不等同于宿主端口，直接展示镜像声明会误导用户。
+        if !network_mode.eq_ignore_ascii_case("host") && !network_mode.is_empty() {
+            all_host_network = false;
+        }
+        exposed_ports.extend(parse_exposed_ports(exposed));
+    }
+    exposed_ports.sort_by_key(|value| value.parse::<u64>().unwrap_or(u64::MAX));
+    exposed_ports.dedup();
+    if !all_host_network {
+        exposed_ports.clear();
+    }
+    (version, host_ports, installed_seconds, exposed_ports)
+}
+
+/// 从镜像名提取标签版本；digest 或无名镜像不返回版本。
+fn image_version(image: &str) -> Option<String> {
+    if image.is_empty() || image.contains('@') {
+        return None;
+    }
+    let tag = image.rsplit(':').next().unwrap_or("");
+    if tag.is_empty() || tag == image {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+/// 从 `docker inspect --format {{json .NetworkSettings.Ports}}` 输出提取宿主端口列表。
+fn parse_host_ports(json_ports: &str) -> Vec<String> {
+    if json_ports.is_empty() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_ports) else {
+        return Vec::new();
+    };
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut ports = Vec::new();
+    for entry in map.values() {
+        if let Some(bindings) = entry.as_array() {
+            for binding in bindings {
+                if let Some(host_port) = binding.get("HostPort").and_then(|value| value.as_str()) {
+                    if !host_port.is_empty() {
+                        ports.push(host_port.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ports.sort_by_key(|value| value.parse::<u64>().unwrap_or(u64::MAX));
+    ports.dedup();
+    ports
+}
+
+/// 解析镜像声明的 `{"80/tcp": {}, "443/tcp": {}}`，提取裸端口并按数值排序去重。
+fn parse_exposed_ports(json_exposed: &str) -> Vec<String> {
+    if json_exposed.is_empty() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_exposed) else {
+        return Vec::new();
+    };
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut ports = Vec::new();
+    for key in map.keys() {
+        let port = key.split('/').next().unwrap_or("");
+        if !port.is_empty() {
+            ports.push(port.to_string());
+        }
+    }
+    ports.sort_by_key(|value| value.parse::<u64>().unwrap_or(u64::MAX));
+    ports.dedup();
+    ports
+}
+
+/// 把 RFC3339 容器创建时间换算为距离现在秒数；无法解析时返回 None。
+fn parse_installed_seconds(created: &str) -> Option<u64> {
+    let created = created.trim();
+    if created.is_empty() {
+        return None;
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(created).ok()?;
+    Some(
+        (Utc::now() - parsed.with_timezone(&Utc))
+            .num_seconds()
+            .max(0) as u64,
+    )
 }
 
 /// 解析 Docker inspect marker，丢弃容器环境变量、挂载和完整配置等敏感字段。
@@ -2384,13 +2549,134 @@ fn category_for(key: &str) -> &'static str {
         "Web 服务器"
     } else if matches!(
         key,
-        "mysql" | "mariadb" | "postgresql" | "redis" | "mongodb"
+        "mysql"
+            | "mariadb"
+            | "postgresql"
+            | "redis"
+            | "mongodb"
+            | "oracle"
+            | "clickhouse"
+            | "tidb"
+            | "doris"
+            | "starrocks"
+            | "milvus"
+            | "pgvector"
+            | "sqlite"
+            | "neo4j"
+            | "influxdb"
+            | "opengauss"
+            | "manticore"
     ) {
         "数据库"
-    } else if key.contains("wordpress") || key.contains("ghost") || key.contains("halo") {
+    } else if matches!(
+        key,
+        "wordpress" | "ghost" | "halo" | "typecho" | "docmost" | "bookstack"
+    ) {
         "建站"
+    } else if matches!(
+        key,
+        "maxkb"
+            | "dify"
+            | "fastgpt"
+            | "ollama"
+            | "anythingllm"
+            | "langbot"
+            | "openwebui"
+            | "localai"
+            | "deepseek-harness"
+            | "openclaw"
+            | "qwenpaw"
+            | "sqlbot"
+            | "hermes-agent"
+            | "crawlab"
+    ) {
+        "AI"
+    } else if matches!(
+        key,
+        "php" | "java" | "node" | "nodejs" | "go" | "python" | "dotnet"
+    ) {
+        "运行环境"
+    } else if matches!(key, "minio" | "nextcloud" | "seafile" | "filebrowser") {
+        "云存储"
+    } else if matches!(key, "dataease" | "superset" | "metabase" | "datart") {
+        "BI"
+    } else if matches!(key, "cordys" | "erpnext" | "suitecrm" | "o2oa") {
+        "CRM"
+    } else if matches!(key, "vault" | "certbot" | "fail2ban" | "crowdsec") {
+        "安全"
+    } else if matches!(key, "code-server" | "vscode" | "coder") {
+        "开发工具"
+    } else if matches!(key, "gitea" | "gitlab" | "jenkins" | "gitee") {
+        "DevOps"
+    } else if matches!(key, "jellyfin" | "plex" | "emby" | "navidrome") {
+        "多媒体"
+    } else if matches!(key, "roundcube" | "mailserver" | "poste") {
+        "邮件服务"
+    } else if key.contains("dos") {
+        "休闲游戏"
     } else {
         "其他"
+    }
+}
+
+/// 为目录中常见应用提供与 Web 端一致的描述；未命中时使用模板文案。
+fn description_for(key: &str) -> &'static str {
+    match key {
+        "openresty" => "基于 NGINX 和 LuaJIT 的 Web 平台",
+        "nginx" => "高性能 Web 服务器与反向代理",
+        "apache" => "老牌开源 HTTP Web 服务器",
+        "caddy" => "快速且可扩展的多平台 HTTP/1-2-3 Web 服务器，支持自动启用 HTTPS",
+        "mysql" => "开源关系型数据库",
+        "mariadb" => "MySQL 的社区分支关系型数据库",
+        "postgresql" => "功能强大的开源关系型数据库",
+        "redis" => "高性能的开源键值数据库",
+        "mongodb" => "面向文档的 NoSQL 数据库",
+        "wordpress" => "全球流行的博客与内容管理系统",
+        "ghost" => "专业的现代博客发布平台",
+        "halo" => "强大易用的开源建站工具",
+        "maxkb" => "强大易用的企业级智能体平台",
+        "dify" => "开源 LLM 应用开发平台",
+        "fastgpt" => "基于大语言模型的知识库问答系统",
+        "ollama" => "本地一键运行大语言模型",
+        "anythingllm" => "开源的私有化 AI 知识库与聊天平台",
+        "openwebui" => "用户友好的 AI 界面（支持 Ollama、OpenAI API 等）",
+        "localai" => "免费的开源 OpenAI 替代品",
+        "langbot" => "开源的 LLM 原生 IM 机器人开发平台",
+        "deepseek-harness" => "DeepSeek 开源智能体开发环境",
+        "openclaw" => "开源、自托管的个人 AI 助理",
+        "qwenpaw" => "阿里开源的 AI 个人助理",
+        "sqlbot" => "基于大模型和 RAG 的智能问数系统",
+        "hermes-agent" => "Nous Research 开源的自托管 AI 智能体",
+        "php" => "PHP 运行环境",
+        "java" => "Java 运行环境",
+        "node" | "nodejs" => "Node 运行环境",
+        "go" => "Go 运行环境",
+        "python" => "Python 运行环境",
+        "dotnet" => ".NET 运行环境",
+        "minio" => "高性能对象存储服务",
+        "nextcloud" => "自托管的云盘与协作平台",
+        "seafile" => "开源云盘与文件同步服务",
+        "filebrowser" => "浏览器中的文件管理器",
+        "dataease" => "人人可用的开源 BI 工具",
+        "superset" => "开源的数据分析与可视化 BI 平台",
+        "metabase" => "开源的商业智能数据平台",
+        "cordys" => "开源 AI CRM 系统，是 Salesforce CRM 的开源替代",
+        "erpnext" => "开源的企业资源计划 ERP 系统",
+        "gitea" => "轻量级的 Git 代码托管服务",
+        "gitlab" => "完整的 DevOps 代码托管平台",
+        "jenkins" => "自动化构建与部署平台",
+        "vault" => "安全的密钥与凭据管理中心",
+        "code-server" => "浏览器中运行的 VS Code",
+        "jellyfin" => "自托管的开源媒体服务器",
+        "navidrome" => "自托管的音乐流媒体服务",
+        "roundcube" => "基于 Web 的多语言 IMAP 邮件客户端",
+        "phpmyadmin" => "MySQL 和 MariaDB 的 Web 管理工具",
+        "docmost" => "开源协作 wiki 与文档软件",
+        "manticore" => "一个高性能、多存储的数据库，专为搜索和分析而设计",
+        "onlyoffice" | "onlyoffice-docs" => "免费的在线办公套件",
+        "teamspeak" => "一款出色的网络语音 (VoIP) 解决方案",
+        "cyberchef" => "浏览器中的数据编码、解码与分析工具",
+        _ => "官方 1Panel 应用模板",
     }
 }
 
@@ -2458,6 +2744,64 @@ mod tests {
         let value = parse_installed("__COMPOSE__\tdocker compose\n__APP__\topenresty\t/opt/1panel/apps/openresty/1.0\t/opt/1panel/apps/openresty/1.0/docker-compose.yml\trunning\n").unwrap();
         assert!(value.compose_available);
         assert_eq!(value.apps[0].project, "1.0");
+    }
+
+    /// 多容器项目：端口来自所有容器并集，版本取首个带标签的镜像。
+    #[test]
+    fn unions_host_ports_across_containers() {
+        let output = "__COMPOSE__\tdocker compose\n__APP__\topenresty\t/opt/1panel/apps/openresty/1.0\t/opt/1panel/apps/openresty/1.0/docker-compose.yml\trunning\topenresty/openresty:1.31.1.1-0-noble|2026-06-12T08:00:00Z|{\"80/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"80\"}],\"443/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"443\"}]};openresty/openresty:1.31.1.1-0-noble|2026-06-12T08:00:00Z|{}\n";
+        let value = parse_installed(output).unwrap();
+        assert_eq!(value.apps[0].version.as_deref(), Some("1.31.1.1-0-noble"));
+        assert_eq!(value.apps[0].host_ports, vec!["80", "443"]);
+    }
+
+    /// 容器无端口映射（host 网络）时，回退解析 Compose 模板第 6 字段的 ports 段。
+    #[test]
+    fn falls_back_to_compose_template_ports() {
+        let output = "__COMPOSE__\tdocker compose\n__APP__\topenresty\t/opt/1panel/apps/openresty/1.0\t/opt/1panel/apps/openresty/1.0/docker-compose.yml\trunning\topenresty/openresty:1.31.1.1-0-noble|2026-06-12T08:00:00Z|{}\t80 443\n";
+        let value = parse_installed(output).unwrap();
+        assert_eq!(value.apps[0].host_ports, vec!["80", "443"]);
+    }
+
+    /// host 网络 + 模板无 ports 段时，从镜像 ExposedPorts 兜底（openresty EXPOSE 80/443）。
+    #[test]
+    fn falls_back_to_image_exposed_ports_on_host_network() {
+        let output = "__COMPOSE__\tdocker compose\n__APP__\topenresty\t/opt/1panel/apps/openresty/1.0\t/opt/1panel/apps/openresty/1.0/docker-compose.yml\trunning\topenresty/openresty:1.31.1.1-0-noble|2026-06-12T08:00:00Z|{}|host|{\"80/tcp\":{},\"443/tcp\":{}}\t\n";
+        let value = parse_installed(output).unwrap();
+        assert_eq!(value.apps[0].host_ports, vec!["80", "443"]);
+    }
+
+    /// 所有端口来源缺失（host 网络、模板无 ports、镜像未 EXPOSE）时，
+    /// 从安装目录 `.env` 的面板端口参数兜底（openresty PANEL_APP_PORT_HTTP=80 / HTTPS=443）。
+    #[test]
+    fn falls_back_to_env_install_ports() {
+        let output = "__COMPOSE__\tdocker compose\n__APP__\topenresty\t/opt/1panel/apps/openresty/openresty\t/opt/1panel/apps/openresty/openresty/docker-compose.yml\trunning\topenresty/openresty:1.31.1.1-0-noble|2026-06-12T08:00:00Z|{}|host|{}\t\t80 443\n";
+        let value = parse_installed(output).unwrap();
+        assert_eq!(value.apps[0].host_ports, vec!["80", "443"]);
+    }
+
+    /// `.env` 端口兜底排在镜像 ExposedPorts 之前：安装参数与镜像声明不一致时以安装参数为准。
+    #[test]
+    fn env_install_ports_win_over_exposed_ports() {
+        let output = "__COMPOSE__\tdocker compose\n__APP__\topenresty\t/opt/1panel/apps/openresty/openresty\t/opt/1panel/apps/openresty/openresty/docker-compose.yml\trunning\topenresty/openresty:1.0|2026-06-12T08:00:00Z|{}|host|{\"80/tcp\":{},\"443/tcp\":{}}\t\t8080\n";
+        let value = parse_installed(output).unwrap();
+        assert_eq!(value.apps[0].host_ports, vec!["8080"]);
+    }
+
+    /// `.env` 不存在或没有面板端口参数时保持空端口列表，不把其他环境变量当作端口。
+    #[test]
+    fn missing_env_ports_keeps_ports_empty() {
+        let output = "__COMPOSE__\tdocker compose\n__APP__\tdemo\t/opt/1panel/apps/demo/1.0\t/opt/1panel/apps/demo/1.0/docker-compose.yml\trunning\tdemo:1|2026-06-12T08:00:00Z|{}|bridge|{}\t\t\n";
+        let value = parse_installed(output).unwrap();
+        assert!(value.apps[0].host_ports.is_empty());
+    }
+
+    /// 桥接网络下不使用 ExposedPorts 兜底，避免把容器端口当作宿主端口展示。
+    #[test]
+    fn rejects_exposed_ports_on_bridge_network() {
+        let output = "__COMPOSE__\tdocker compose\n__APP__\tdemo\t/opt/1panel/apps/demo/1.0\t/opt/1panel/apps/demo/1.0/docker-compose.yml\trunning\tdemo:1|2026-06-12T08:00:00Z|{}|bridge|{\"8080/tcp\":{}}\t\n";
+        let value = parse_installed(output).unwrap();
+        assert!(value.apps[0].host_ports.is_empty());
     }
 
     #[test]

@@ -101,11 +101,7 @@ export function TerminalPage() {
   };
 
   return <section className="terminal-page">
-    <div className="workspace-header terminal-header">
-      <div><div className="breadcrumb">服务器 / {profile.data?.name ?? "…"} / <span>终端</span></div><h1>SSH 终端</h1><p>{profile.data ? `${profile.data.username}@${profile.data.host}` : "正在载入"}</p></div>
-      <div className="workspace-header__actions"><Button size="sm" onClick={() => setShortcutManagerOpen(true)}><Sparkles size={14} /> 快捷指令</Button><span className={`connection-pill ${connection.data?.status === "online" ? "is-online" : ""}`}><i /> {connection.data?.status === "online" ? `${tabs.length} 个交互会话` : "SSH 已断开"}</span></div>
-    </div>
-    <nav className="workspace-tabs"><NavLink end to={`/servers/${serverId}`}>概览</NavLink><NavLink to={`/servers/${serverId}/files`}>文件</NavLink><NavLink className="active" to={`/servers/${serverId}/terminal`}>终端</NavLink><NavLink to={`/servers/${serverId}/operations`}>端口与进程</NavLink><NavLink to={`/servers/${serverId}/services`}>服务</NavLink><NavLink to={`/servers/${serverId}/tools`}>工具</NavLink><NavLink to={`/servers/${serverId}/logs`}>日志</NavLink><NavLink to={`/servers/${serverId}/nginx`}>Nginx</NavLink><NavLink to={`/servers/${serverId}/docker`}>Docker</NavLink></nav>
+    <div className="page-toolbar">{profile.data && <span className="connection-pill"><i /> {profile.data.username}@{profile.data.host}</span>}<span className={`connection-pill ${connection.data?.status === "online" ? "is-online" : ""}`}><i /> {connection.data?.status === "online" ? `${tabs.length} 个交互会话` : "SSH 已断开"}</span><Button size="sm" onClick={() => setShortcutManagerOpen(true)}><Sparkles size={14} /> 快捷指令</Button></div>
     <div className="terminal-workspace">
       <div className="terminal-tabbar">
         <div className="terminal-tabs">

@@ -1,6 +1,6 @@
 # Current implementation state
 
-最后更新：2026-08-22（Asia/Shanghai）。本文记录 `1panel-client` 的当前代码事实和可复现证据；模块边界与剩余缺口见 [`FUNCTION_MATRIX.md`](FUNCTION_MATRIX.md)。
+最后更新：2026-08-28（Asia/Shanghai）。本文记录 `1panel-client` 的当前代码事实和可复现证据；模块边界与剩余缺口见 [`FUNCTION_MATRIX.md`](FUNCTION_MATRIX.md)。
 
 ## 仓库与技术栈
 
@@ -28,7 +28,7 @@
 
 ### 1Panel 对齐模块
 
-- 网站：OpenResty/Nginx 静态站点、反向代理、HTTPS 证书元数据、certbot/acme.sh HTTP-01 签发/续期、certbot Cloudflare DNS-01、acme.sh Cloudflare/阿里云/DNSPod/腾讯云/AWS Route 53 DNS-01（临时 0600 环境文件）、PHP-FPM 探测/安装/站点 FastCGI 绑定、静态站点可指定容器内可见 PHP socket 覆盖自动探测（容器化 OpenResty 无法直连宿主机 socket 的场景）、同域受控站点证书自动绑定、配置测试/reload/回滚和启停/删除。证书批量策略后端与 IPC 已就绪（`certificate_renewal_plan`、`get_certificate_renewal_plan`、`certificateRenewalPlan`、前端「证书批量策略」面板 JSX），但**面板 CSS 未完成，且未做真实运行验收**。
+- 网站：OpenResty/Nginx 静态站点、反向代理、HTTPS 证书元数据、certbot/acme.sh HTTP-01 签发/续期、certbot Cloudflare DNS-01、acme.sh Cloudflare/阿里云/DNSPod/腾讯云/AWS Route 53 DNS-01（临时 0600 环境文件）、PHP-FPM 探测/安装/站点 FastCGI 绑定、静态站点可指定容器内可见 PHP socket 覆盖自动探测（容器化 OpenResty 无法直连宿主机 socket 的场景）、同域受控站点证书自动绑定、配置测试/reload/回滚和启停/删除。证书批量策略后端与 IPC 已就绪（`certificate_renewal_plan`、`get_certificate_renewal_plan`、`certificateRenewalPlan`），前端「证书批量策略」面板已完成 CSS 与视觉/真实运行验收（详见测试服务器证据与 ACCEPTANCE.md）。
 - 安全：UFW/firewalld/nftables 快照与受控规则增删，SSH 配置读取/备份/校验/reload。
 - 数据库：MySQL/MariaDB/PostgreSQL/Redis 探测，数据库/用户/权限与真实数据库级权限矩阵，SQL 备份/恢复、服务生命周期与 apt/dnf/apk/pacman 引擎安装计划/可取消执行/安装后验证；验证同时检查客户端命令、版本和 systemd/OpenRC 状态，并兼容 PostgreSQL 版本化服务名。权限矩阵安全诊断新增 MySQL/MariaDB 的 Grant Option（可继续授权）与 PostgreSQL 跨库 CREATE（创建对象范围偏广）两类引擎差异告警，并在权限面板中始终展示诊断列表（之前只在权限为空时显示）。Redis 支持 ACL 用户创建/删除/授权/撤销/重置密码与脱敏规则读取、键扫描、类型/TTL/内存摘要、删除、确认后的 FLUSHDB、字符串值读取/写入和可选 TTL、hash/list/set/zset 受控逐项编辑、远端 DUMP/RESTORE 复杂值快照导入导出，以及支持目标 AUTH/AUTH2、保留类型/TTL 的 MIGRATE 跨实例/跨版本逐键迁移。
 - 应用商店：读取官方 GitHub appstore 或用户配置的静态镜像目录、Compose 模板详情、安装/启动/停止/重启/卸载、卸载后恢复和日志；目录/详情使用本地 TTL 缓存并支持离线回退、最多 8 个有序镜像节点故障转移、缓存清理，更新会拉取当前来源最新模板并备份回滚，升级前可在远端计算当前/最新 Compose 哈希与行数差异，环境变量支持键摘要与合并保存，已安装应用可读取容器健康摘要；应用商店页面可生成包含 metadata、版本 Compose、env 和 catalog.json 的静态镜像目录，写出 HMAC-SHA256 catalog.sig，并用操作系统密钥链中的令牌验签。
@@ -72,6 +72,7 @@ release smoke launch              PASS (运行 8 秒后安全退出)
 - 计划任务真实 SSH smoke 已创建临时目录和网站备份任务，并使用测试机已安装 Compose 应用验证应用备份；目录任务启用 2 份/30 天保留策略，验证 UTC 时间戳 tar.gz 生成与清理命令；同时验证 marker 写入、版本化导出、导入新 marker、手动执行、受控删除和临时资源清理；未保留远端业务数据。
 - 存储真实 SSH smoke 只读读取测试机 lsblk/findmnt/df/fstab，确认根挂载点和容量字段可解析；未执行挂载、卸载或 fstab 写入，远端状态未改变。
 - WAF CRS 真实 SSH smoke 只读读取固定 2 个规则源及能力状态；未执行下载、安装或 reload，远端状态未改变。
+- 证书批量策略真实 Web 桌面应用验收（2026-08-28）：通过客户端 UI 在测试服务器创建受控 HTTPS 静态站点 `renew-panel-test.wingeng.xyz`（使用临时自签证书，到期 2026-09-22，经 Docker 容器内 openssl 读取到期时间），「证书批量策略」面板出现真实数据行（域名 + 即将到期 + 到期时间 + 续期按钮）；提前续期天数输入框验证 30（行显示）/10（空态与输入框仍保留，提示阈值之上无需签发）/365（行仍显示）三档；随后通过 UI 删除站点，站点与面板消失、受控站点恢复 0；SSH 核对 conf.d 无残留、证书目录已删除、`openresty -t` 通过；临时资源闭环，无业务数据残留。
 
 ## Release 产物
 
@@ -85,4 +86,4 @@ release smoke launch              PASS (运行 8 秒后安全退出)
 
 更多第三方 CRS/签名规则源与策略编排、数据库权限模型差异诊断、AI 更多工具编排和真实第三方 MCP 兼容性仍按功能矩阵继续开发；`.github/workflows/package.yml` 已加入 Linux/macOS/Windows Tauri bundle 矩阵，本机未在 Windows 外执行跨平台构建。固定日志告警摘要、阈值过滤/本地历史、每小时趋势、30 秒轮询的应用内提示、匹配容器日志摘要、宿主机及容器内 WAF 规则文件安全编辑、内置 WAF 策略模板、OWASP CRS 固定来源安装/更新/移除回滚、系统密钥链 webhook 通知、多级 ProxyJump 链路与循环检测、只读服务器智能体、MCP stdio/远程 HTTP-SSE 工具、可取消 AI 流式请求、真实 `/models` 能力探测、本地 AI 会话持久化、Compose 卸载后恢复、升级前 Compose 差异预览、官方分支提交号显示、基于真实 Docker label 的清理候选预览、支持源/目标 AUTH/AUTH2 的 Redis MIGRATE 逐键迁移、Redis 页面当前会话认证、数据库权限矩阵和可取消数据库安装、apt/dnf/apk/pacman 与 systemd/OpenRC 发行版适配、静态镜像目录生成与 catalog.sig 验签已落地。
 
-当前待办/未完成：网站证书批量策略面板 CSS 未补充；完整国际化与日志审计字段完全对齐未做；本机未执行 Windows 外的 bundle 验收；`pnpm tauri dev` 的真实桌面启动、逐页点击与 1panel 面板对照尚未在本轮完成。测试服务器与 1panel 面板凭据见 [`docs/TEST_SERVER.md`](TEST_SERVER.md)。
+当前待办/未完成：完整国际化与日志审计字段完全对齐未做；本机未执行 Windows 外的 bundle 验收；本轮已用 `pnpm tauri dev` 桌面应用对网站证书批量策略完成真实启动、逐页点击与 1Panel 面板对照（网站/证书页面），其余页面的大阶段视觉验收仍按需进行。测试服务器与 1panel 面板凭据见 [`docs/TEST_SERVER.md`](TEST_SERVER.md)。

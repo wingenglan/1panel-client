@@ -21,9 +21,11 @@ printf '__PLATFORM__\n'; if command -v apt-get >/dev/null; then echo apt; elif c
 printf '__DF__\n'; df -B1 -P 2>/dev/null || true
 printf '__CPU_A__\n'; head -n1 /proc/stat 2>/dev/null || true
 printf '__NET_A__\n'; cat /proc/net/dev 2>/dev/null || true
+printf '__IO_A__\n'; cat /proc/diskstats 2>/dev/null || true
 sleep 0.25
 printf '__CPU_B__\n'; head -n1 /proc/stat 2>/dev/null || true
 printf '__NET_B__\n'; cat /proc/net/dev 2>/dev/null || true
+printf '__IO_B__\n'; cat /proc/diskstats 2>/dev/null || true
 printf '__COUNTS__\n'; systemctl --failed --type=service --no-legend --no-pager 2>/dev/null | wc -l; ss -H -lntu 2>/dev/null | wc -l
 printf '__TOP_PROCESSES__\n'; ps -eo pid=,comm=,pcpu=,pmem=,args= --sort=-pcpu 2>/dev/null | head -n 6 || true
 printf '__MOUNTS__\n'; if command -v findmnt >/dev/null 2>&1; then findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null; else cat /proc/mounts 2>/dev/null; fi
@@ -60,6 +62,12 @@ pub struct SystemOverview {
     pub swap_free_bytes: u64,
     pub network_rx_bytes_per_second: u64,
     pub network_tx_bytes_per_second: u64,
+    pub network_rx_bytes_total: u64,
+    pub network_tx_bytes_total: u64,
+    pub io_read_bytes_per_second: u64,
+    pub io_write_bytes_per_second: u64,
+    pub io_count_per_second: u64,
+    pub io_latency_ms: u64,
     pub failed_services: u32,
     pub listening_ports: u32,
     pub disks: Vec<DiskUsage>,
@@ -139,11 +147,18 @@ pub fn parse_overview(output: &str) -> AppResult<SystemOverview> {
         .lines()
         .filter_map(|value| value.trim().parse().ok())
         .collect();
-    let (network_rx_bytes_per_second, network_tx_bytes_per_second) = network_delta(
+    let (
+        network_rx_bytes_per_second,
+        network_tx_bytes_per_second,
+        network_rx_bytes_total,
+        network_tx_bytes_total,
+    ) = network_totals_pair(
         section(&sections, "NET_A"),
         section(&sections, "NET_B"),
         0.25,
     );
+    let (io_read_bytes_per_second, io_write_bytes_per_second, io_count_per_second, io_latency_ms) =
+        io_delta(section(&sections, "IO_A"), section(&sections, "IO_B"), 0.25);
     let capabilities = parse_capabilities(section(&sections, "CAPABILITIES"));
     let server_capabilities = ServerCapabilities::from_probe(
         platform.first().copied().unwrap_or("unknown"),
@@ -201,6 +216,12 @@ pub fn parse_overview(output: &str) -> AppResult<SystemOverview> {
         swap_free_bytes: meminfo.get("SwapFree").copied().unwrap_or(0) * 1024,
         network_rx_bytes_per_second,
         network_tx_bytes_per_second,
+        network_rx_bytes_total,
+        network_tx_bytes_total,
+        io_read_bytes_per_second,
+        io_write_bytes_per_second,
+        io_count_per_second,
+        io_latency_ms,
         failed_services: *counts.first().unwrap_or(&0),
         listening_ports: *counts.get(1).unwrap_or(&0),
         disks: parse_df(section(&sections, "DF")),
@@ -215,32 +236,91 @@ pub fn parse_overview(output: &str) -> AppResult<SystemOverview> {
     })
 }
 
+fn network_totals(input: &str) -> (u64, u64) {
+    input
+        .lines()
+        .filter_map(|line| {
+            let (interface, values) = line.split_once(':')?;
+            if interface.trim() == "lo" {
+                return None;
+            }
+            let values: Vec<u64> = values
+                .split_whitespace()
+                .filter_map(|value| value.parse().ok())
+                .collect();
+            Some((*values.first()?, *values.get(8)?))
+        })
+        .fold((0, 0), |total, value| {
+            (total.0 + value.0, total.1 + value.1)
+        })
+}
+
+#[cfg(test)]
 pub fn network_delta(first: &str, second: &str, seconds: f64) -> (u64, u64) {
-    fn totals(input: &str) -> (u64, u64) {
-        input
-            .lines()
-            .filter_map(|line| {
-                let (interface, values) = line.split_once(':')?;
-                if interface.trim() == "lo" {
-                    return None;
-                }
-                let values: Vec<u64> = values
-                    .split_whitespace()
-                    .filter_map(|value| value.parse().ok())
-                    .collect();
-                Some((*values.first()?, *values.get(8)?))
-            })
-            .fold((0, 0), |total, value| {
-                (total.0 + value.0, total.1 + value.1)
-            })
-    }
-    let first = totals(first);
-    let second = totals(second);
+    let (rx_second, tx_second, _, _) = network_totals_pair(first, second, seconds);
+    (rx_second, tx_second)
+}
+
+fn network_totals_pair(first: &str, second: &str, seconds: f64) -> (u64, u64, u64, u64) {
+    let first = network_totals(first);
+    let second = network_totals(second);
     let seconds = seconds.max(0.001);
     (
         (second.0.saturating_sub(first.0) as f64 / seconds) as u64,
         (second.1.saturating_sub(first.1) as f64 / seconds) as u64,
+        second.0,
+        second.1,
     )
+}
+
+/// Parses two /proc/diskstats snapshots into per-second IO rates, operation count and latency.
+/// diskstats fields: major minor name reads reads_merged sectors_read ms_read writes writes_merged sectors_written ms_write ...
+fn io_delta(first: &str, second: &str, seconds: f64) -> (u64, u64, u64, u64) {
+    fn io_totals(input: &str) -> (u64, u64, u64, u64) {
+        input
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() < 11 {
+                    return None;
+                }
+                let name = fields[2];
+                if ["loop", "ram", "zram", "sr", "fd"]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                {
+                    return None;
+                }
+                let read_sectors = fields[5].parse::<u64>().ok()?;
+                let write_sectors = fields[9].parse::<u64>().ok()?;
+                let read_ops = fields[3].parse::<u64>().ok()?;
+                let write_ops = fields[7].parse::<u64>().ok()?;
+                let read_ms = fields[6].parse::<u64>().ok()?;
+                let write_ms = fields[10].parse::<u64>().ok()?;
+                Some((
+                    read_sectors,
+                    write_sectors,
+                    read_ops + write_ops,
+                    read_ms.max(write_ms),
+                ))
+            })
+            .fold((0, 0, 0, 0), |acc, value| {
+                (
+                    acc.0 + value.0,
+                    acc.1 + value.1,
+                    acc.2 + value.2,
+                    acc.3 + value.3,
+                )
+            })
+    }
+    let first = io_totals(first);
+    let second = io_totals(second);
+    let seconds = seconds.max(0.001);
+    let read_bytes = (second.0.saturating_sub(first.0) as f64 / seconds * 512.0) as u64;
+    let write_bytes = (second.1.saturating_sub(first.1) as f64 / seconds * 512.0) as u64;
+    let count = (second.2.saturating_sub(first.2) as f64 / seconds) as u64;
+    let latency = (second.3.saturating_sub(first.3) as f64 / seconds) as u64;
+    (read_bytes, write_bytes, count, latency)
 }
 
 fn split_sections(output: &str) -> HashMap<String, String> {

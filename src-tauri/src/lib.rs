@@ -41,6 +41,7 @@ fn initialize_logging(app: &tauri::AppHandle) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 启动桌面应用并注册前端可调用的命令，包括受确认保护的 Compose 创建入口。
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -135,8 +136,10 @@ pub fn run() {
             commands::docker_container_follow_logs,
             commands::docker_resource_action,
             commands::docker_image_action,
+            commands::docker_prune,
             commands::docker_resource_inspect,
             commands::docker_compose_action,
+            commands::docker_compose_create,
             commands::docker_compose_save_yaml,
             commands::docker_compose_details,
             commands::docker_compose_logs,
@@ -178,6 +181,7 @@ pub fn run() {
             commands::get_certificate_renewal_plan,
             commands::save_website,
             commands::website_action,
+            commands::website_nginx_service,
             commands::website_certificate_action,
             commands::bind_website_certificate,
             commands::get_php_install_plan,

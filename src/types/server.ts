@@ -127,6 +127,12 @@ export interface SystemOverview {
   swapFreeBytes: number;
   networkRxBytesPerSecond: number;
   networkTxBytesPerSecond: number;
+  networkRxBytesTotal?: number;
+  networkTxBytesTotal?: number;
+  ioReadBytesPerSecond?: number;
+  ioWriteBytesPerSecond?: number;
+  ioCountPerSecond?: number;
+  ioLatencyMs?: number;
   failedServices: number;
   listeningPorts: number;
   disks: Array<{ mount: string; totalBytes: number; usedBytes: number; usagePercent: number }>;
@@ -305,6 +311,8 @@ export interface MetricSample {
   loadOne: number;
   networkRxBytesPerSecond: number;
   networkTxBytesPerSecond: number;
+  ioReadBytesPerSecond?: number;
+  ioWriteBytesPerSecond?: number;
   diskUsagePercent: number | null;
 }
 
@@ -472,6 +480,7 @@ export interface WebsiteRecord {
 export interface WebsiteSnapshot {
   supported: boolean;
   managedConfDir: string | null;
+  nginxVersion: string | null;
   runtimeRoot: string | null;
   hostRoot: string | null;
   websites: WebsiteRecord[];
@@ -535,6 +544,7 @@ export interface DockerSnapshot {
   storageDriver: string | null;
   cgroupVersion: string | null;
   rootDir: string | null;
+  socketPath: string | null;
   diskUsage: string | null;
   containers: DockerContainerInfo[];
   images: DockerImageInfo[];
@@ -548,13 +558,17 @@ export interface DockerContainerInfo {
   name: string;
   image: string;
   status: string;
+  state: string;
   health: string | null;
   created: string;
   ports: string;
+  ipAddresses: string;
   composeProject: string | null;
   restartPolicy: string | null;
   cpuLimitNano: number | null;
   memoryLimitBytes: number | null;
+  cpuPercent: number;
+  memoryPercent: number;
 }
 
 export interface DockerImageInfo {
@@ -613,6 +627,12 @@ export interface DockerComposeDetails {
 
 export interface DockerTextResult {
   containerId: string;
+  output: string;
+}
+
+export interface DockerPruneResult {
+  kind: "images" | "containers" | "volumes" | "builders";
+  command: string;
   output: string;
 }
 
@@ -1184,6 +1204,9 @@ export interface InstalledApp {
   composePath: string;
   project: string;
   status: string;
+  version?: string | null;
+  hostPorts?: string[];
+  installedSeconds?: number | null;
 }
 
 export interface InstalledAppsSnapshot {

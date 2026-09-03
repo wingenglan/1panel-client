@@ -21,6 +21,9 @@ const CronjobPage = lazy(() => import("./features/cronjob/CronjobPage").then((mo
 const AppStorePage = lazy(() => import("./features/appstore/AppStorePage").then((module) => ({ default: module.AppStorePage })));
 const SecurityPage = lazy(() => import("./features/security/SecurityPage").then((module) => ({ default: module.SecurityPage })));
 const WebsitePage = lazy(() => import("./features/website/WebsitePage").then((module) => ({ default: module.WebsitePage })));
+const CertificatesPage = lazy(() => import("./features/website/CertificatesPage").then((module) => ({ default: module.CertificatesPage })));
+const TemplatesPage = lazy(() => import("./features/website/TemplatesPage").then((module) => ({ default: module.TemplatesPage })));
+const RuntimesPage = lazy(() => import("./features/website/RuntimesPage").then((module) => ({ default: module.RuntimesPage })));
 const AdvancedPage = lazy(() => import("./features/advanced/AdvancedPage").then((module) => ({ default: module.AdvancedPage })));
 
 const queryClient = new QueryClient({
@@ -51,6 +54,9 @@ export default function App() {
             <Route path="servers/:serverId/appstore" element={<Suspense fallback={<div className="page-state">正在载入应用商店…</div>}><AppStorePage /></Suspense>} />
             <Route path="servers/:serverId/security" element={<Suspense fallback={<div className="page-state">正在载入安全中心…</div>}><SecurityPage /></Suspense>} />
             <Route path="servers/:serverId/website" element={<Suspense fallback={<div className="page-state">正在载入网站…</div>}><WebsitePage /></Suspense>} />
+            <Route path="servers/:serverId/website/certificates" element={<Suspense fallback={<div className="page-state">正在载入证书…</div>}><CertificatesPage /></Suspense>} />
+            <Route path="servers/:serverId/website/templates" element={<Suspense fallback={<div className="page-state">正在载入模板…</div>}><TemplatesPage /></Suspense>} />
+            <Route path="servers/:serverId/website/runtimes" element={<Suspense fallback={<div className="page-state">正在载入运行环境…</div>}><RuntimesPage /></Suspense>} />
             <Route path="servers/:serverId/advanced" element={<Suspense fallback={<div className="page-state">正在载入高级功能…</div>}><AdvancedPage /></Suspense>} />
             <Route path="settings" element={<SettingsPage />} />
             <Route path="ai" element={<AiPage />} />

@@ -283,7 +283,6 @@ fn valid_working_dir(value: &str) -> bool {
 mod tests {
     use super::{build_command, LogQuery, LogSource};
 
-    /// Creates a bounded log query fixture for command validation tests.
     fn query(source: LogSource, target: Option<&str>) -> LogQuery {
         LogQuery {
             server_id: "server".into(),
@@ -297,14 +296,12 @@ mod tests {
     }
 
     #[test]
-    /// Verifies that Nginx queries use the fixed access log path.
     fn builds_fixed_nginx_paths() {
         let command = build_command(&query(LogSource::NginxAccess, None), 200, false).unwrap();
         assert_eq!(command, "tail -n 200 -- /var/log/nginx/access.log");
     }
 
     #[test]
-    /// Rejects shell metacharacters in a systemd unit name.
     fn rejects_invalid_systemd_unit() {
         assert!(build_command(
             &query(LogSource::Systemd, Some("bad;rm.service")),

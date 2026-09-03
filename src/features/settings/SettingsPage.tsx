@@ -1,4 +1,5 @@
-import { CheckCircle2, ClipboardList, Cloud, Download, HardDrive, Info, KeyRound, Languages, LockKeyhole, Moon, Plus, RotateCcw, RefreshCw, Server, Trash2, Upload } from "lucide-react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { CheckCircle2, ClipboardList, Cloud, Download, HardDrive, Info, KeyRound, Languages, Layers, LockKeyhole, Moon, Package, Plus, RotateCcw, RefreshCw, Server, ShieldCheck, Trash2, Upload, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/Button";
@@ -6,7 +7,7 @@ import { api } from "../../lib/api";
 import { errorMessage } from "../../lib/errors";
 import { applyLocale, readLocale, saveLocale, type Locale } from "../../lib/i18n";
 import { pushNotice } from "../../lib/noticeStore";
-import type { BackupAccount, CronOfflineSchedulerSettings, PublicServerImport } from "../../types/server";
+import type { AppStoreSettings, BackupAccount, CronOfflineSchedulerSettings, PublicServerImport } from "../../types/server";
 
 type BackupAccountKind = "local" | "webdav" | "s3" | "sftp";
 type BackupAccountDraft = { id?: string; name: string; kind: BackupAccountKind; serverId: string; endpoint: string; remotePath: string; bucket: string; region: string; username: string; privateKeyPath: string; hostKeyFingerprint: string; secret: string };
@@ -26,7 +27,7 @@ function backupAccountKindLabel(kind: string): string {
   return kind === "local" ? "本机目录" : kind === "webdav" ? "WebDAV" : kind === "s3" ? "S3 兼容" : "SFTP";
 }
 
-/** 展示本地偏好和不含 secret 的服务器配置导入/导出操作。 */
+/** 展示本地偏好和配置导入/导出；共享设置查询变化时同步编辑草稿。 */
 export function SettingsPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fullBackupInputRef = useRef<HTMLInputElement>(null);
@@ -36,6 +37,30 @@ export function SettingsPage() {
   const [theme, setTheme] = useState<"system" | "dark" | "light">(() => (localStorage.getItem("1panel-client.theme") as "system" | "dark" | "light" | null) ?? "light");
   const [locale, setLocale] = useState<Locale>(() => readLocale());
   const [restoreWorkspace, setRestoreWorkspace] = useState(() => localStorage.getItem("1panel-client.restoreWorkspace") !== "false");
+  const [pageTabs, setPageTabs] = useState(() => localStorage.getItem("1panel-client.pageTabs") !== "false");
+  const [appStoreDraft, setAppStoreDraft] = useState<AppStoreSettings>({ source: "official", mirrorBaseUrl: null, mirrorBaseUrls: [], cacheTtlSeconds: 3600, offlineMode: false, mirrorKeyId: null, signatureConfigured: false });
+  const [mirrorUrlsText, setMirrorUrlsText] = useState("");
+  const [mirrorGeneratorOpen, setMirrorGeneratorOpen] = useState(false);
+  const appStoreSettings = useQuery({ queryKey: ["appstore-settings"], queryFn: api.appStoreSettings, staleTime: Infinity });
+  const saveAppStore = useMutation({
+    mutationFn: (value: AppStoreSettings) => api.saveAppStoreSettings({ ...value, mirrorBaseUrls: mirrorUrlsText.split(/\r?\n/).map((item) => item.trim()).filter(Boolean), mirrorBaseUrl: mirrorUrlsText.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)[0] ?? null }),
+    onSuccess: async (value) => { setAppStoreDraft(value); setMirrorUrlsText(value.mirrorBaseUrls.join("\n")); await queryClient.invalidateQueries({ queryKey: ["app-catalog"] }); },
+  });
+  const clearAppStoreCache = useMutation({ mutationFn: api.clearAppStoreCache, onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["app-catalog"] }); setMessage("应用商店缓存已清理"); } });
+
+  const [lastAppStoreSettings, setLastAppStoreSettings] = useState<AppStoreSettings>();
+  // 查询结果变化时同步草稿，避免通过 effect 追加一次渲染。
+  if (appStoreSettings.data && appStoreSettings.data !== lastAppStoreSettings) {
+    setLastAppStoreSettings(appStoreSettings.data);
+    setAppStoreDraft(appStoreSettings.data);
+    setMirrorUrlsText(appStoreSettings.data.mirrorBaseUrls.join("\n") || appStoreSettings.data.mirrorBaseUrl || "");
+  }
+  /** 镜像设置保存后更新草稿，并刷新共享查询。 */
+  const handleMirrorSettingsSaved = (value: AppStoreSettings) => {
+    setAppStoreDraft(value);
+    setMirrorUrlsText(value.mirrorBaseUrls.join("\n") || value.mirrorBaseUrl || "");
+    void queryClient.invalidateQueries({ queryKey: ["appstore-settings"] });
+  };
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: light)");
@@ -46,6 +71,12 @@ export function SettingsPage() {
     return () => media.removeEventListener("change", apply);
   }, [theme]);
   useEffect(() => { localStorage.setItem("1panel-client.restoreWorkspace", String(restoreWorkspace)); }, [restoreWorkspace]);
+  /** 菜单标签页单选与侧栏共享：写入本地存储并通知 AppShell 即时生效。 */
+  const applyPageTabs = (checked: boolean) => {
+    setPageTabs(checked);
+    localStorage.setItem("1panel-client.pageTabs", String(checked));
+    window.dispatchEvent(new Event("1panel-client:prefs"));
+  };
   useEffect(() => { saveLocale(locale); applyLocale(locale); }, [locale]);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -134,11 +165,9 @@ export function SettingsPage() {
 
   return (
     <section className="settings-page">
-      <div className="workspace-header">
-        <div><div className="breadcrumb">应用</div><h1>设置</h1><p>本地偏好与安全策略</p></div>
-      </div>
       <div className="settings-list">
-        <article><Moon /><div><strong>外观</strong><p>主题选择保存在本机，不影响服务器。</p></div><select value={theme} onChange={(event) => setTheme(event.target.value as "system" | "dark" | "light")}><option value="system">跟随系统</option><option value="dark">深色</option><option value="light">浅色</option></select></article>
+        <article><Moon /><div><strong>外观</strong><p>主题选择保存在本机，不影响服务器。</p></div><div className="theme-radio-group" role="radiogroup" aria-label="外观主题">{([["light", "亮色"], ["dark", "深色"], ["system", "跟随系统"]] as const).map(([value, label]) => <label key={value} className={`theme-radio${theme === value ? " is-active" : ""}`}><input type="radio" name="theme" value={value} checked={theme === value} onChange={() => setTheme(value)} /><span>{label}</span></label>)}</div></article>
+        <article><Layers /><div><strong>菜单标签页</strong><p>在内容区顶部显示已打开的页面页签，与 Web 面板一致。</p></div><div className="theme-radio-group" role="radiogroup" aria-label="菜单标签页"><label className={`theme-radio${pageTabs ? " is-active" : ""}`}><input type="radio" name="pageTabs" value="enabled" checked={pageTabs} onChange={() => applyPageTabs(true)} /><span>启用</span></label><label className={`theme-radio${!pageTabs ? " is-active" : ""}`}><input type="radio" name="pageTabs" value="disabled" checked={!pageTabs} onChange={() => applyPageTabs(false)} /><span>停用</span></label></div></article>
         <article><Languages /><div><strong>语言偏好</strong><p>选择保存在本机；翻译资源会按同一 locale key 扩展。</p></div><select value={locale} onChange={(event) => setLocale(event.target.value as Locale)}><option value="zh-CN">简体中文</option><option value="en-US">English</option></select></article>
         <article><LockKeyhole /><div><strong>凭据</strong><p>SSH 与 sudo 密码存储在操作系统安全存储，不写入数据库。</p></div><span className="settings-badge">已保护</span></article>
         <article><RotateCcw /><div><strong>连接恢复</strong><p>保存是否恢复上次打开的工作区偏好；不会自动重放危险任务。</p></div><input type="checkbox" checked={restoreWorkspace} onChange={(event) => setRestoreWorkspace(event.target.checked)} /></article>
@@ -149,10 +178,49 @@ export function SettingsPage() {
         <article className="settings-actions"><RefreshCw /><div><strong>离线归档补传</strong><p>客户端在线时读取服务器归档事件，并自动补传到计划任务选择的备份账号；状态保存在本机，不会写入远端凭据。</p></div><label className="check-field"><input type="checkbox" checked={offlineScheduler.data?.enabled ?? true} onChange={(event) => saveOfflineScheduler.mutate(event.target.checked)} disabled={offlineScheduler.isLoading || saveOfflineScheduler.isPending} /><span>{offlineScheduler.data?.enabled === false ? "已停用" : "已启用"}</span></label>{saveOfflineScheduler.error && <small className="text-danger">{errorMessage(saveOfflineScheduler.error)}</small>}</article>
         <article className="settings-actions"><ClipboardList /><div><strong>诊断与审计</strong><p>导出本地连接状态、非敏感档案和最近审计记录，便于排障；不包含凭据和远端输出。</p></div><Button variant="secondary" size="sm" onClick={() => void exportDiagnostics()} disabled={busy}><Download size={13} /> 导出诊断 JSON</Button></article>
         <article className="settings-audit"><div><strong>最近审计记录</strong><p>只保存本地操作元数据，不保存命令输出。</p></div>{audit.isLoading && <small>正在读取…</small>}{audit.error && <small className="text-danger">{errorMessage(audit.error)}</small>}{audit.data?.length ? <div className="settings-audit__list">{audit.data.slice(0, 8).map((event) => <div key={event.id}><span className={`audit-result is-${event.result}`}>{event.result}</span><strong>{event.summary}</strong><small>{new Date(event.createdAt).toLocaleString()}</small></div>)}</div> : !audit.isLoading && <small>尚无审计记录。</small>}</article>
+        <article className="settings-appstore">
+          <div className="settings-appstore__head"><Package /><div><strong>App store 目录与缓存</strong><p>选择本地应用商店来源并管理目录、详情与镜像缓存；改动只会影响本机，不会修改远端面板。</p></div><span className="settings-badge">{appStoreSettings.data?.source === "mirror" ? "镜像" : appStoreSettings.data?.offlineMode ? "离线" : "官方"}</span></div>
+          <div className="appstore-settings-form">
+            <label><span>应用商店来源</span><select value={appStoreDraft.source} onChange={(event) => setAppStoreDraft((current) => ({ ...current, source: event.target.value as "official" | "mirror" }))}><option value="official">官方仓库</option><option value="mirror">自定义镜像仓库</option></select></label>
+            <label><span>镜像仓库地址（每行一个，优先使用第一个可用地址）</span><textarea rows={5} value={mirrorUrlsText} onChange={(event) => setMirrorUrlsText(event.target.value)} placeholder="https://mirror.example.com/1panel-apps" /></label>
+            <label><span>目录缓存有效期（秒）</span><input type="number" min={60} value={appStoreDraft.cacheTtlSeconds} onChange={(event) => setAppStoreDraft((current) => ({ ...current, cacheTtlSeconds: Math.max(60, Number(event.target.value) || 60) }))} /></label>
+            <label className="checkbox-row"><input type="checkbox" checked={appStoreDraft.offlineMode} onChange={(event) => setAppStoreDraft((current) => ({ ...current, offlineMode: event.target.checked }))} /><span>离线模式（只使用本地缓存，不访问网络）</span></label>
+            {appStoreSettings.error && <div className="form-error">{errorMessage(appStoreSettings.error)}</div>}
+            {saveAppStore.error && <div className="form-error">{errorMessage(saveAppStore.error)}</div>}
+            {clearAppStoreCache.error && <div className="form-error">{errorMessage(clearAppStoreCache.error)}</div>}
+            <div className="dialog-actions">
+              <Button size="sm" variant="primary" onClick={() => saveAppStore.mutate(appStoreDraft)} disabled={saveAppStore.isPending}>{saveAppStore.isPending ? "保存中…" : "保存设置"}</Button>
+              <Button size="sm" variant="secondary" onClick={() => clearAppStoreCache.mutate()} disabled={clearAppStoreCache.isPending}>{clearAppStoreCache.isPending ? "清理中…" : "清理目录缓存"}</Button>
+              <Button size="sm" variant="ghost" onClick={() => setMirrorGeneratorOpen(true)}><Package size={13} />生成静态镜像</Button>
+            </div>
+          </div>
+        </article>
         <article><Info /><div><strong>关于 1Panel Client</strong><p>版本 0.1.0 · 多服务器、本地优先桌面客户端 · GPL-3.0</p></div><span className="settings-badge">社区版</span></article>
       </div>
       {message && <div className="settings-feedback is-success">{message}</div>}
       {error && <div className="settings-feedback is-error">{error}</div>}
+      <MirrorGeneratorDialog open={mirrorGeneratorOpen} onOpenChange={setMirrorGeneratorOpen} settings={appStoreSettings.data ?? appStoreDraft} onSettingsSaved={handleMirrorSettingsSaved} />
     </section>
   );
+}
+
+/** 提供静态应用商店镜像生成、HMAC 验签配置和结果摘要，不在结果中显示令牌。 */
+function MirrorGeneratorDialog({ open, onOpenChange, settings, onSettingsSaved }: { open: boolean; onOpenChange: (open: boolean) => void; settings: AppStoreSettings; onSettingsSaved: (value: AppStoreSettings) => void }) {
+  const [destination, setDestination] = useState("");
+  const [keyId, setKeyId] = useState(settings.mirrorKeyId ?? "mirror-main");
+  const [signingSecret, setSigningSecret] = useState("");
+  const [maxApps, setMaxApps] = useState(512);
+  const [rememberVerification, setRememberVerification] = useState(true);
+  const [confirmed, setConfirmed] = useState(false);
+  const generation = useMutation({
+    mutationFn: async () => {
+      if (rememberVerification) {
+        const saved = await api.saveAppStoreSettings({ ...settings, mirrorKeyId: keyId.trim() || null, mirrorVerificationSecret: signingSecret, clearMirrorVerificationSecret: false });
+        onSettingsSaved(saved);
+      }
+      return api.generateAppStoreMirror({ destination, keyId, signingSecret, maxApps, confirmed });
+    },
+  });
+  const submit = () => { generation.mutate(); };
+  return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content"><div className="dialog-header"><div><Dialog.Title>生成静态应用镜像</Dialog.Title><Dialog.Description>从当前应用商店来源下载目录、metadata、版本 Compose 和环境模板，写入本机静态目录。</Dialog.Description></div><Dialog.Close asChild><button className="icon-control" aria-label="关闭"><X size={17} /></button></Dialog.Close></div><div className="app-install-form"><label><span>输出目录（绝对路径）</span><input value={destination} onChange={(event) => setDestination(event.target.value)} placeholder="C:\\1panel-mirror 或 /srv/1panel-mirror" /></label><label><span>验签 key ID</span><input value={keyId} onChange={(event) => setKeyId(event.target.value)} placeholder="mirror-main" /></label><label><span>HMAC 验签令牌</span><input type="password" value={signingSecret} onChange={(event) => setSigningSecret(event.target.value)} autoComplete="new-password" placeholder="至少 16 个字符" /><small>只发送给本地 Rust 后端；不会写入普通配置文件。生成后可保存到操作系统密钥链。</small></label><label><span>最多生成应用数</span><input type="number" min={1} max={512} value={maxApps} onChange={(event) => setMaxApps(Math.max(1, Math.min(512, Number(event.target.value) || 1)))} /></label><label className="checkbox-row"><input type="checkbox" checked={rememberVerification} onChange={(event) => setRememberVerification(event.target.checked)} /><span>将令牌保存为当前客户端的镜像验签配置</span></label><label className="checkbox-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>我确认允许在本机创建或覆盖镜像目录文件</span></label>{generation.error && <div className="form-error">{errorMessage(generation.error)}</div>}{generation.data && <div className="security-note"><ShieldCheck size={18} /><span>已生成 {generation.data.appCount} 个应用、{generation.data.versionCount} 个版本、{generation.data.fileCount} 个文件；目录摘要 {generation.data.catalogSha256.slice(0, 16)}…</span></div>}<div className="dialog-actions"><Button variant="ghost" onClick={() => onOpenChange(false)}>关闭</Button><Button variant="primary" onClick={submit} disabled={!destination.trim() || !keyId.trim() || !signingSecret.trim() || !confirmed || generation.isPending}>{generation.isPending ? "生成中…" : "生成并签名"}</Button></div></div></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }

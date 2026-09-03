@@ -16,6 +16,7 @@ pub struct NginxSnapshot {
     pub container_site_root: Option<String>,
     pub site_host_root: Option<String>,
     pub version: Option<String>,
+    pub image: Option<String>,
     pub config_path: Option<String>,
     pub config_test: Option<bool>,
     pub managed_conf_supported: bool,
@@ -106,6 +107,7 @@ pub async fn snapshot(ssh: &SshConnectionManager, server_id: &str) -> AppResult<
                 container_site_root: None,
                 site_host_root: None,
                 version: None,
+                image: None,
                 config_path: None,
                 config_test: None,
                 managed_conf_supported: false,
@@ -332,7 +334,7 @@ pub async fn save_proxy(
 
 /// 返回固定的 Nginx 探测脚本，不把用户输入拼入命令。
 fn nginx_dump_command() -> &'static str {
-    "set +e; container=''; if command -v docker >/dev/null 2>&1; then container=$(docker ps --format '{{.ID}}\\t{{.Image}}' | awk -F '\\t' 'tolower($2) ~ /(openresty|nginx)/ {print $1; exit}'); fi; if [ -n \"$container\" ]; then printf '__CONTAINER__%s\\n' \"$container\"; printf '__BINARY__openresty\\n'; printf '__FLAVOR__openresty\\n'; printf '__RUNNING__\\n'; host_dir=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/usr/local/openresty/nginx/conf/conf.d\"}}{{.Source}}{{end}}{{end}}' \"$container\" 2>/dev/null); [ -n \"$host_dir\" ] && printf '__MANAGED_DIR__%s\\n' \"$host_dir\"; site_host_root=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/www\"}}{{.Source}}{{end}}{{end}}' \"$container\" 2>/dev/null); [ -n \"$site_host_root\" ] && printf '__SITE_HOST_ROOT__%s\\n' \"$site_host_root\"; printf '__CONTAINER_SITE_ROOT__/www\\n'; docker exec \"$container\" openresty -v 2>&1; docker exec \"$container\" openresty -T 2>&1; exit $?; fi; binary=''; for candidate in nginx openresty /usr/local/openresty/nginx/sbin/nginx /usr/local/openresty/bin/openresty /usr/local/openresty/bin/nginx /opt/1panel/apps/openresty/openresty/bin/openresty /opt/1panel/apps/openresty/openresty/bin/nginx; do if command -v \"$candidate\" >/dev/null 2>&1; then binary=$(command -v \"$candidate\"); break; fi; if [ -x \"$candidate\" ]; then binary=\"$candidate\"; break; fi; done; if [ -z \"$binary\" ]; then printf 'nginx/openresty: not found\\n' >&2; exit 127; fi; printf '__BINARY__%s\\n' \"$binary\"; case \"$binary\" in *openresty*) printf '__FLAVOR__openresty\\n';; *) printf '__FLAVOR__nginx\\n';; esac; if (command -v systemctl >/dev/null 2>&1 && (systemctl is-active --quiet nginx || systemctl is-active --quiet openresty)) || (command -v pgrep >/dev/null 2>&1 && pgrep -f -- \"$binary\" >/dev/null 2>&1); then printf '__RUNNING__\\n'; else printf '__STOPPED__\\n'; fi; \"$binary\" -v 2>&1; \"$binary\" -T 2>&1"
+    "set +e; container=''; if command -v docker >/dev/null 2>&1; then container=$(docker ps --format '{{.ID}}\\t{{.Image}}' | awk -F '\\t' 'tolower($2) ~ /(openresty|nginx)/ {print $1; exit}'); fi; if [ -n \"$container\" ]; then printf '__CONTAINER__%s\\n' \"$container\"; printf '__BINARY__openresty\\n'; printf '__FLAVOR__openresty\\n'; printf '__RUNNING__\\n'; image=$(docker inspect --format '{{.Config.Image}}' \"$container\" 2>/dev/null); [ -n \"$image\" ] && printf '__IMAGE__%s\\n' \"$image\"; host_dir=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/usr/local/openresty/nginx/conf/conf.d\"}}{{.Source}}{{end}}{{end}}' \"$container\" 2>/dev/null); [ -n \"$host_dir\" ] && printf '__MANAGED_DIR__%s\\n' \"$host_dir\"; site_host_root=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/www\"}}{{.Source}}{{end}}{{end}}' \"$container\" 2>/dev/null); [ -n \"$site_host_root\" ] && printf '__SITE_HOST_ROOT__%s\\n' \"$site_host_root\"; printf '__CONTAINER_SITE_ROOT__/www\\n'; docker exec \"$container\" openresty -v 2>&1; docker exec \"$container\" openresty -T 2>&1; exit $?; fi; binary=''; for candidate in nginx openresty /usr/local/openresty/nginx/sbin/nginx /usr/local/openresty/bin/openresty /usr/local/openresty/bin/nginx /opt/1panel/apps/openresty/openresty/bin/openresty /opt/1panel/apps/openresty/openresty/bin/nginx; do if command -v \"$candidate\" >/dev/null 2>&1; then binary=$(command -v \"$candidate\"); break; fi; if [ -x \"$candidate\" ]; then binary=\"$candidate\"; break; fi; done; if [ -z \"$binary\" ]; then printf 'nginx/openresty: not found\\n' >&2; exit 127; fi; printf '__BINARY__%s\\n' \"$binary\"; case \"$binary\" in *openresty*) printf '__FLAVOR__openresty\\n';; *) printf '__FLAVOR__nginx\\n';; esac; if (command -v systemctl >/dev/null 2>&1 && (systemctl is-active --quiet nginx || systemctl is-active --quiet openresty)) || (command -v pgrep >/dev/null 2>&1 && pgrep -f -- \"$binary\" >/dev/null 2>&1); then printf '__RUNNING__\\n'; else printf '__STOPPED__\\n'; fi; \"$binary\" -v 2>&1; \"$binary\" -T 2>&1"
 }
 
 /// 校验会被写入 Nginx 配置的字段，阻止控制字符和路径穿越。
@@ -517,6 +519,7 @@ struct Parser {
     certificates: Vec<CertificateMetadata>,
     config_sources: Vec<String>,
     version: Option<String>,
+    image: Option<String>,
     flavor: String,
     binary: Option<String>,
     container_id: Option<String>,
@@ -565,6 +568,10 @@ impl Parser {
                 }
                 continue;
             }
+            if let Some(image) = line.strip_prefix("__IMAGE__") {
+                self.image = Some(image.to_string());
+                continue;
+            }
             if let Some(directory) = line.strip_prefix("__MANAGED_DIR__") {
                 self.managed_conf_dir = Some(directory.to_string());
                 continue;
@@ -594,8 +601,12 @@ impl Parser {
                 continue;
             }
             self.source_line += 1;
-            if line.contains("nginx/") && line.contains("version") {
-                self.version = line.split("nginx/").nth(1).map(str::to_string);
+            if let Some(tail) = line.strip_prefix("nginx version:") {
+                self.version = tail
+                    .split_once("nginx/")
+                    .or_else(|| tail.split_once("openresty/"))
+                    .map(|(_, version)| version.split_whitespace().next().unwrap_or(version))
+                    .map(str::to_string);
             }
             let (code, _) = strip_comment(raw);
             let mut tokens = tokenize(&code);
@@ -765,7 +776,15 @@ impl Parser {
             container_id: self.container_id,
             container_site_root: self.container_site_root,
             site_host_root: self.site_host_root,
-            version: self.version,
+            version: self
+                .image
+                .as_deref()
+                .and_then(|raw| {
+                    let tag = raw.rsplit(':').next().unwrap_or(raw);
+                    (tag != raw && tag != "latest" && tag.contains('.')).then(|| tag.to_string())
+                })
+                .or_else(|| self.version.clone()),
+            image: self.image,
             config_path: self.config_path,
             config_test: None,
             managed_conf_supported: self.managed_conf_supported,

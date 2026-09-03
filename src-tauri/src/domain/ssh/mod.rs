@@ -460,6 +460,7 @@ impl SshConnectionManager {
         server_id: &str,
         columns: u32,
         rows: u32,
+        command: Option<String>,
     ) -> AppResult<(String, mpsc::Receiver<TerminalEvent>)> {
         let connection = self.connection_for_operation(server_id).await?;
         let channel = connection
@@ -487,11 +488,18 @@ impl SshConnectionManager {
                     .details(error)
                     .for_server(server_id)
             })?;
-        channel.request_shell(true).await.map_err(|error| {
-            AppError::new("TERMINAL_OPEN_FAILED", "terminal", "远端拒绝启动交互 Shell")
-                .details(error)
-                .for_server(server_id)
-        })?;
+        match command {
+            Some(command) => channel.exec(true, command).await.map_err(|error| {
+                AppError::new("TERMINAL_OPEN_FAILED", "terminal", "远端拒绝执行命令")
+                    .details(error)
+                    .for_server(server_id)
+            })?,
+            None => channel.request_shell(true).await.map_err(|error| {
+                AppError::new("TERMINAL_OPEN_FAILED", "terminal", "远端拒绝启动交互 Shell")
+                    .details(error)
+                    .for_server(server_id)
+            })?,
+        };
 
         let terminal_id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = mpsc::channel(256);
@@ -985,7 +993,8 @@ impl SshConnectionManager {
         })?
     }
 
-    /// 返回可执行远程操作的 SSH 会话；发现网络断开时，仅对已建立过的会话自动重连。
+    /// 返回可执行远程操作的 SSH 会话；发现断开或从未建立会时透明尝试恢复连接，
+    /// 主机密钥尚未信任的服务器保持原错误，引导用户到概览页完成指纹核对。
     async fn connection_for_operation(&self, server_id: &str) -> AppResult<Arc<ManagedConnection>> {
         if let Some(connection) = self.connections.get(server_id).map(|value| value.clone()) {
             if !connection.handle.is_closed() {
@@ -1000,12 +1009,14 @@ impl SshConnectionManager {
             .errors
             .get(server_id)
             .is_some_and(|error| error.code == "SSH_CONNECTION_LOST");
-        if should_reconnect {
-            if let Ok(ConnectOutcome::Connected(_)) = self.reconnect(server_id).await {
-                if let Some(connection) = self.connections.get(server_id).map(|value| value.clone())
-                {
-                    return Ok(connection);
-                }
+        let outcome = if should_reconnect {
+            self.reconnect(server_id).await
+        } else {
+            self.connect(server_id).await
+        };
+        if let Ok(ConnectOutcome::Connected(_)) = outcome {
+            if let Some(connection) = self.connections.get(server_id).map(|value| value.clone()) {
+                return Ok(connection);
             }
         }
 

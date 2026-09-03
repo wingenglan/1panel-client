@@ -67,12 +67,10 @@ export function LogsPage() {
   }), [serverId, source, target, workingDir, service, tail, privileged]);
   const load = useMutation({ mutationFn: () => api.getLogs(query), onSuccess: (value) => setOutput(limitOutput(value.output)) });
 
-  /** Appends streamed log chunks while the view is active and reflects cancellation. */
   const onEvent = (event: CommandEvent) => {
     if (event.event === "output" && !pausedRef.current) setOutput((current) => limitOutput(`${current}${event.data.data}`));
     if (event.event === "cancelled") setFollowing(false);
   };
-  /** Starts a bounded log task and renews it while the user still wants to follow. */
   const startFollow = (clearView = true) => {
     if (followIdRef.current) return;
     const taskId = crypto.randomUUID();
@@ -96,7 +94,6 @@ export function LogsPage() {
       setFollowing(false);
     });
   };
-  /** Stops renewal and cancels the current remote log task. */
   const stopFollow = () => { followWantedRef.current = false; if (followIdRef.current) void api.cancelCommandTask(followIdRef.current); followIdRef.current = null; setFollowing(false); };
   const visibleOutput = useMemo(() => filterOutput(output, search, caseSensitive), [output, search, caseSensitive]);
 

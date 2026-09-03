@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Bell, Download, Globe2, History, PackageCheck, Play, Plus, RefreshCw, Save, Settings2, ShieldCheck, TimerReset, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { NavLink, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "../../components/ui/Button";
 import { api } from "../../lib/api";
@@ -71,8 +71,7 @@ export function AdvancedPage() {
   const openWafSettings = () => { if (wafAlerts.data) setWafSettingsDraft(wafAlerts.data.settings); setWafWebhookUrl(""); setWafWebhookSigningSecret(""); setClearWafWebhook(false); setWafSettingsOpen(true); };
 
   return <section className="advanced-page">
-    <div className="workspace-header"><div><div className="breadcrumb">服务器 / <span>高级功能</span></div><h1>高级功能</h1><p>网站可用性探活、WAF 能力探测与安全建议</p></div><div className="workspace-header__actions"><Button variant="secondary" onClick={() => { void advanced.refetch(); void monitors.refetch(); }} disabled={advanced.isFetching}><RefreshCw size={14} className={advanced.isFetching ? "spin" : ""} />刷新能力</Button></div></div>
-    <AdvancedTabs serverId={serverId} />
+    <div className="page-toolbar"><Button variant="secondary" onClick={() => { void advanced.refetch(); void monitors.refetch(); }} disabled={advanced.isFetching}><RefreshCw size={14} className={advanced.isFetching ? "spin" : ""} />刷新能力</Button></div>
     <WafTemplatePanel serverId={serverId} templates={wafTemplates.data ?? []} selectedId={selectedWafTemplateId} supported={wafRules.data?.supported ?? false} applying={wafTemplateAction.isPending} error={wafTemplateAction.error ? errorMessage(wafTemplateAction.error) : null} onSelect={setSelectedWafTemplateId} onApply={applyWafTemplate} />
     <WafRuleSourcePanel snapshot={wafSources.data} loading={wafSources.isLoading} error={wafSources.error ? errorMessage(wafSources.error) : null} pending={wafSourceAction.isPending} actionError={wafSourceAction.error ? errorMessage(wafSourceAction.error) : null} onAction={runWafSourceAction} />
     {advanced.isLoading && <div className="page-state">正在读取远端高级能力…</div>}
@@ -87,9 +86,6 @@ export function AdvancedPage() {
     </>}
   </section>;
 }
-
-/** 复用服务器工作区导航，并把安全、网站和高级能力放在同一条上下文中。 */
-function AdvancedTabs({ serverId }: { serverId: string }) { return <nav className="workspace-tabs"><NavLink to={`/servers/${serverId}`}>概览</NavLink><NavLink to={`/servers/${serverId}/website`}>网站</NavLink><NavLink to={`/servers/${serverId}/security`}>安全</NavLink><NavLink className="active" to={`/servers/${serverId}/advanced`}>高级功能</NavLink><NavLink to={`/servers/${serverId}/logs`}>日志</NavLink></nav>; }
 
 /** 展示后端固定 WAF 策略模板，应用动作仍要求服务器存在受控规则文件。 */
 function WafTemplatePanel({ templates, selectedId, supported, applying, error, onSelect, onApply }: { serverId: string; templates: Awaited<ReturnType<typeof api.wafTemplates>>; selectedId: string; supported: boolean; applying: boolean; error: string | null; onSelect: (id: string) => void; onApply: () => void }) {

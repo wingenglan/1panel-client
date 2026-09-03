@@ -1,5 +1,6 @@
 use crate::domain::ssh::{CommandEvent, RemoteCommandResult, SshConnectionManager};
 use crate::errors::{AppError, AppResult};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ pub struct DockerSnapshot {
     pub storage_driver: Option<String>,
     pub cgroup_version: Option<String>,
     pub root_dir: Option<String>,
+    pub socket_path: Option<String>,
     pub disk_usage: Option<String>,
     pub containers: Vec<ContainerInfo>,
     pub images: Vec<ImageInfo>,
@@ -30,13 +32,17 @@ pub struct ContainerInfo {
     pub name: String,
     pub image: String,
     pub status: String,
+    pub state: String,
     pub health: Option<String>,
     pub created: String,
     pub ports: String,
+    pub ip_addresses: String,
     pub compose_project: Option<String>,
     pub restart_policy: Option<String>,
     pub cpu_limit_nano: Option<i64>,
     pub memory_limit_bytes: Option<i64>,
+    pub cpu_percent: f64,
+    pub memory_percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -248,6 +254,8 @@ pub struct DockerResourceActionInput {
     pub name: String,
     pub action: String,
     #[serde(default)]
+    pub driver: Option<String>,
+    #[serde(default)]
     pub sudo: bool,
     #[serde(default)]
     pub confirmed: bool,
@@ -284,6 +292,26 @@ pub struct DockerResourceInspectInput {
     pub name: String,
     #[serde(default)]
     pub sudo: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerPruneInput {
+    pub server_id: String,
+    /// images | containers | volumes | builders
+    pub kind: String,
+    #[serde(default)]
+    pub sudo: bool,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerPruneResult {
+    pub kind: String,
+    pub command: String,
+    pub output: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -957,9 +985,17 @@ pub async fn resource_action(
         .for_server(&input.server_id));
     }
     let command = format!(
-        "docker {} {} {}",
+        "docker {} {} {}{}",
         input.kind,
         input.action,
+        if input.action == "create" && input.driver.is_some() {
+            format!(
+                "--driver {} ",
+                crate::security::shell_escape(input.driver.as_deref().unwrap_or_default())
+            )
+        } else {
+            String::new()
+        },
         crate::security::shell_escape(&input.name)
     );
     let result = if input.sudo {
@@ -1003,6 +1039,54 @@ pub async fn resource_action(
         name: input.name,
         action: input.action,
         verified: true,
+    })
+}
+
+/// 释放 Docker 磁盘占用（image/container/volume/builder prune），必须经 UI 确认。
+pub async fn docker_prune(
+    ssh: &SshConnectionManager,
+    input: DockerPruneInput,
+) -> AppResult<DockerPruneResult> {
+    let command = match input.kind.as_str() {
+        "images" => "docker image prune -f",
+        "containers" => "docker container prune -f",
+        "volumes" => "docker volume prune -f",
+        "networks" => "docker network prune -f",
+        "builders" => "docker builder prune -f",
+        _ => {
+            return Err(AppError::new(
+                "VALIDATION_FAILED",
+                "validation",
+                "Docker 释放类型无效",
+            ))
+        }
+    };
+    if !input.confirmed {
+        return Err(AppError::new(
+            "CONFIRMATION_REQUIRED",
+            "confirmation",
+            "Docker 释放操作必须经过用户确认",
+        )
+        .for_server(&input.server_id));
+    }
+    let result = if input.sudo {
+        ssh.execute_privileged(&input.server_id, command, Duration::from_secs(300))
+            .await?
+    } else {
+        ssh.execute(&input.server_id, command, Duration::from_secs(300))
+            .await?
+    };
+    if result.exit_code != 0 {
+        return Err(
+            AppError::new("DOCKER_PRUNE_FAILED", "docker", "Docker 释放操作失败")
+                .details(result.stderr)
+                .for_server(&input.server_id),
+        );
+    }
+    Ok(DockerPruneResult {
+        kind: input.kind,
+        command: command.to_string(),
+        output: result.stdout,
     })
 }
 
@@ -1225,7 +1309,7 @@ pub async fn compose_details(
         compose_containers,
         compose_services,
     ) = tokio::join!(
-        compose_execute(
+        Box::pin(compose_execute(
             ssh,
             server_id,
             working_dir,
@@ -1233,8 +1317,8 @@ pub async fn compose_details(
             "ps --all --format json",
             sudo,
             Duration::from_secs(30),
-        ),
-        compose_execute(
+        )),
+        Box::pin(compose_execute(
             ssh,
             server_id,
             working_dir,
@@ -1242,8 +1326,8 @@ pub async fn compose_details(
             "config",
             sudo,
             Duration::from_secs(45),
-        ),
-        compose_execute(
+        )),
+        Box::pin(compose_execute(
             ssh,
             server_id,
             working_dir,
@@ -1251,8 +1335,8 @@ pub async fn compose_details(
             "config --volumes",
             sudo,
             Duration::from_secs(30),
-        ),
-        compose_execute(
+        )),
+        Box::pin(compose_execute(
             ssh,
             server_id,
             working_dir,
@@ -1260,32 +1344,32 @@ pub async fn compose_details(
             "config --networks",
             sudo,
             Duration::from_secs(30),
-        ),
-        docker_label_list(
+        )),
+        Box::pin(docker_label_list(
             ssh,
             server_id,
             "volume",
             project,
             sudo,
             Duration::from_secs(30),
-        ),
-        docker_label_list(
+        )),
+        Box::pin(docker_label_list(
             ssh,
             server_id,
             "network",
             project,
             sudo,
             Duration::from_secs(30),
-        ),
-        docker_label_list(
+        )),
+        Box::pin(docker_label_list(
             ssh,
             server_id,
             "container",
             project,
             sudo,
             Duration::from_secs(30),
-        ),
-        compose_execute(
+        )),
+        Box::pin(compose_execute(
             ssh,
             server_id,
             working_dir,
@@ -1293,7 +1377,7 @@ pub async fn compose_details(
             "config --services",
             sudo,
             Duration::from_secs(30),
-        )
+        ))
     );
     let services = services?.stdout;
     let config = config?;
@@ -1491,6 +1575,142 @@ pub async fn save_compose_yaml(
     Ok(saved)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerComposeCreateInput {
+    pub server_id: String,
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub force_pull: bool,
+    #[serde(default)]
+    pub sudo: bool,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+/// 远程创建 Compose 项目：建目录、写 compose.yaml、校验变更后启动；
+/// 目标目录已存在同名 compose.yaml 时拒绝覆盖。
+pub async fn compose_create(
+    ssh: &SshConnectionManager,
+    input: DockerComposeCreateInput,
+) -> AppResult<DockerResourceActionResult> {
+    validate_name(&input.name)?;
+    if !input.confirmed {
+        return Err(AppError::new(
+            "CONFIRMATION_REQUIRED",
+            "confirmation",
+            "创建 Compose 项目必须经过用户确认",
+        )
+        .for_server(&input.server_id));
+    }
+    if input.content.trim().is_empty() {
+        return Err(AppError::new(
+            "VALIDATION_FAILED",
+            "validation",
+            "Compose YAML 内容不能为空",
+        )
+        .for_server(&input.server_id));
+    }
+    if input.content.len() > 512 * 1024 {
+        return Err(AppError::new(
+            "VALIDATION_FAILED",
+            "validation",
+            "Compose YAML 内容超过 512 KB",
+        )
+        .for_server(&input.server_id));
+    }
+    let dir = match input.working_dir.as_deref() {
+        Some(path) if !path.trim().is_empty() => {
+            validate_working_dir(path)?;
+            path.trim_end_matches('/').to_string()
+        }
+        _ => format!("/opt/1panel/compose/{}", input.name),
+    };
+    let config_path = format!("{dir}/compose.yaml");
+    let mkdir = if input.sudo {
+        ssh.execute_privileged(
+            &input.server_id,
+            &format!("mkdir -p {}", crate::security::shell_escape(&dir)),
+            Duration::from_secs(30),
+        )
+        .await?
+    } else {
+        ssh.execute(
+            &input.server_id,
+            &format!("mkdir -p {}", crate::security::shell_escape(&dir)),
+            Duration::from_secs(30),
+        )
+        .await?
+    };
+    if mkdir.exit_code != 0 {
+        return Err(AppError::new(
+            "COMPOSE_CREATE_DIR_FAILED",
+            "docker",
+            "创建 Compose 目录失败",
+        )
+        .details(mkdir.stderr)
+        .for_server(&input.server_id));
+    }
+    let encoded = BASE64.encode(input.content.as_bytes());
+    let body = format!(
+        "if test -e {}; then echo 'compose.yaml already exists' >&2; exit 1; fi; printf '%s' '{}' | base64 -d > {}",
+        crate::security::shell_escape(&config_path),
+        encoded,
+        crate::security::shell_escape(&config_path)
+    );
+    let written = if input.sudo {
+        ssh.execute_privileged(&input.server_id, &body, Duration::from_secs(60))
+            .await?
+    } else {
+        ssh.execute(&input.server_id, &body, Duration::from_secs(60))
+            .await?
+    };
+    if written.exit_code != 0 {
+        return Err(AppError::new(
+            "COMPOSE_CREATE_WRITE_FAILED",
+            "docker",
+            "写入 compose.yaml 失败",
+        )
+        .details(written.stderr)
+        .for_server(&input.server_id));
+    }
+    let up_suffix = format!(
+        "-f {} up -d{}",
+        crate::security::shell_escape(&config_path),
+        if input.force_pull {
+            " --pull always"
+        } else {
+            ""
+        }
+    );
+    let up = compose_execute(
+        ssh,
+        &input.server_id,
+        Some(&dir),
+        &input.name,
+        &up_suffix,
+        input.sudo,
+        Duration::from_secs(900),
+    )
+    .await?;
+    if up.exit_code != 0 {
+        return Err(
+            AppError::new("COMPOSE_CREATE_UP_FAILED", "docker", "Compose 项目启动失败")
+                .details(up.stdout + &up.stderr)
+                .for_server(&input.server_id),
+        );
+    }
+    Ok(DockerResourceActionResult {
+        kind: "compose".into(),
+        name: input.name.clone(),
+        action: "create".into(),
+        verified: true,
+    })
+}
+
 /// 读取 Compose 项目或单个服务的最近日志，限制输出行数。
 pub async fn compose_logs(
     ssh: &SshConnectionManager,
@@ -1610,6 +1830,7 @@ fn empty_snapshot() -> DockerSnapshot {
         storage_driver: None,
         cgroup_version: None,
         root_dir: None,
+        socket_path: None,
         disk_usage: None,
         containers: Vec::new(),
         images: Vec::new(),
@@ -1820,7 +2041,7 @@ fn validate_restart_policy(value: &str) -> AppResult<()> {
 }
 /// 返回固定的 Docker CLI JSON 探测脚本。
 fn snapshot_command() -> &'static str {
-    "set -e; if ! command -v docker >/dev/null 2>&1; then printf 'docker: not found\\n' >&2; exit 127; fi; printf '__VERSION__\\n'; docker version --format '{{json .Server}}'; printf '__INFO__\\n'; docker info --format '{{json .}}'; printf '__CONTAINERS__\\n'; docker ps -a --format '{{json .}}'; printf '__CONTAINER_RESOURCES__\\n'; for id in $(docker ps -aq); do docker inspect --format '{{.Id}}\\t{{.HostConfig.RestartPolicy.Name}}\\t{{.HostConfig.NanoCpus}}\\t{{.HostConfig.Memory}}' \"$id\"; done; printf '__IMAGES__\\n'; docker images --format '{{json .}}'; printf '__VOLUMES__\\n'; docker volume ls --format '{{json .}}' 2>/dev/null || true; printf '__NETWORKS__\\n'; docker network ls --format '{{json .}}' 2>/dev/null || true; printf '__DISK__\\n'; docker system df --format '{{json .}}' 2>/dev/null || true; printf '__COMPOSE__\\n'; docker compose ls --all --format json 2>/dev/null || true"
+    "set -e; if ! command -v docker >/dev/null 2>&1; then printf 'docker: not found\\n' >&2; exit 127; fi; printf '__VERSION__\\n'; docker version --format '{{json .Server}}'; printf '__INFO__\\n'; docker info --format '{{json .}}'; printf '__CONTAINERS__\\n'; docker ps -a --format '{{json .}}'; printf '__CONTAINER_RESOURCES__\\n'; for id in $(docker ps -aq); do docker inspect --format '{{.Id}}\\t{{.HostConfig.RestartPolicy.Name}}\\t{{.HostConfig.NanoCpus}}\\t{{.HostConfig.Memory}}' \"$id\"; done; printf '__CONTAINER_STATS__\\n'; docker stats --no-stream --format '{{json .}}' 2>/dev/null || true; printf '__IMAGES__\\n'; docker images --format '{{json .}}'; printf '__VOLUMES__\\n'; docker volume ls --format '{{json .}}' 2>/dev/null || true; printf '__NETWORKS__\\n'; docker network ls --format '{{json .}}' 2>/dev/null || true; printf '__DISK__\\n'; docker system df --format '{{json .}}' 2>/dev/null || true; printf '__COMPOSE__\\n'; docker compose ls --all --format json 2>/dev/null || true; printf '__SOCK__\\n'; docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true"
 }
 
 /// 将带 section marker 的 Docker CLI 输出转换为强类型快照。
@@ -1831,6 +2052,10 @@ pub fn parse_snapshot(output: &str) -> Option<DockerSnapshot> {
     let resources = sections
         .get("CONTAINER_RESOURCES")
         .map(|value| parse_container_resources(value))
+        .unwrap_or_default();
+    let stats = sections
+        .get("CONTAINER_STATS")
+        .map(|value| parse_container_stats(value))
         .unwrap_or_default();
     let mut containers: Vec<ContainerInfo> = sections
         .get("CONTAINERS")
@@ -1845,6 +2070,13 @@ pub fn parse_snapshot(output: &str) -> Option<DockerSnapshot> {
             container.cpu_limit_nano = resource.cpu_limit_nano;
             container.memory_limit_bytes = resource.memory_limit_bytes;
         }
+        if let Some((_, stat)) = stats
+            .iter()
+            .find(|(id, _)| id.starts_with(&container.id) || container.id.starts_with(id.as_str()))
+        {
+            container.cpu_percent = stat.cpu_percent;
+            container.memory_percent = stat.memory_percent;
+        }
     }
     let images = sections
         .get("IMAGES")
@@ -1858,10 +2090,25 @@ pub fn parse_snapshot(output: &str) -> Option<DockerSnapshot> {
         .get("NETWORKS")
         .map(|value| value.lines().filter_map(parse_network).collect())
         .unwrap_or_default();
-    let disk_usage = sections
+    let disk_usage_lines: Vec<serde_json::Value> = sections
         .get("DISK")
+        .map(|value| {
+            value
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let disk_usage = if disk_usage_lines.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&disk_usage_lines).unwrap_or_else(|_| "[]".to_string()))
+    };
+    let socket_path = sections
+        .get("SOCK")
         .and_then(|value| first_line(value))
-        .map(str::to_string);
+        .map(str::to_string)
+        .filter(|context| !context.is_empty() && context.starts_with("unix://"));
     let compose_projects = sections
         .get("COMPOSE")
         .map(|value| parse_compose(value))
@@ -1897,6 +2144,7 @@ pub fn parse_snapshot(output: &str) -> Option<DockerSnapshot> {
             .get("DockerRootDir")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        socket_path,
         disk_usage,
         containers,
         images,
@@ -1913,12 +2161,41 @@ fn parse_container(line: &str) -> Option<ContainerInfo> {
         .get(r#"Label "com.docker.compose.project""#)
         .or_else(|| value.get("Label com.docker.compose.project"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            // docker ps --format '{{json .}}' 的 Labels 是逗号拼接的 KEY=VALUE 字符串。
+            value
+                .get("Labels")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|labels| {
+                    labels
+                        .split(',')
+                        .find_map(|part| part.strip_prefix("com.docker.compose.project="))
+                })
+                .map(str::to_string)
+        });
+    let ip_addresses = value
+        .get("Networks")
+        .and_then(|networks| networks.as_object())
+        .map(|networks| {
+            networks
+                .values()
+                .filter_map(|network| network.get("IPAddress").and_then(serde_json::Value::as_str))
+                .filter(|ip| !ip.is_empty())
+                .collect::<Vec<&str>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
     Some(ContainerInfo {
         id: value.get("ID")?.as_str()?.into(),
         name: value.get("Names")?.as_str()?.into(),
         image: value.get("Image")?.as_str()?.into(),
         status: value.get("Status")?.as_str()?.into(),
+        state: value
+            .get("State")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .into(),
         health: value.get("Status")?.as_str().and_then(parse_health),
         created: value
             .get("CreatedAt")
@@ -1930,11 +2207,46 @@ fn parse_container(line: &str) -> Option<ContainerInfo> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .into(),
+        ip_addresses,
         compose_project,
         restart_policy: None,
         cpu_limit_nano: None,
         memory_limit_bytes: None,
+        cpu_percent: 0.0,
+        memory_percent: 0.0,
     })
+}
+
+/// 解析 docker stats --no-stream 的单行 JSON，提取 CPU/内存使用率。
+fn parse_container_stats(line: &str) -> Option<(String, ContainerStats)> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let id = value.get("ID")?.as_str()?;
+    let cpu_percent = value
+        .get("CPUPerc")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_percent);
+    let memory_percent = value
+        .get("MemPerc")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_percent);
+    Some((
+        id.into(),
+        ContainerStats {
+            cpu_percent: cpu_percent.unwrap_or(0.0),
+            memory_percent: memory_percent.unwrap_or(0.0),
+        },
+    ))
+}
+
+/// 去掉百分比值尾部 "%" 并转为浮点。
+fn parse_percent(text: &str) -> Option<f64> {
+    text.trim_end_matches('%').trim().parse::<f64>().ok()
+}
+
+#[derive(Debug, Clone, Default)]
+struct ContainerStats {
+    cpu_percent: f64,
+    memory_percent: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -2053,6 +2365,25 @@ fn parse_compose(value: &str) -> Vec<ComposeProject> {
         .into_iter()
         .flatten()
         .filter_map(|entry| {
+            let config_files = entry
+                .get("ConfigFiles")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            // `compose ls --format json` 不输出 WorkingDir，从 ConfigFiles 目录回退推导。
+            let working_dir = entry
+                .get("WorkingDir")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    config_files.split(',').next().and_then(|file| {
+                        std::path::Path::new(file.trim())
+                            .parent()
+                            .map(|parent| parent.to_string_lossy().into_owned())
+                    })
+                })
+                .unwrap_or_default();
             Some(ComposeProject {
                 name: entry.get("Name")?.as_str()?.into(),
                 status: entry
@@ -2060,27 +2391,25 @@ fn parse_compose(value: &str) -> Vec<ComposeProject> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .into(),
-                config_files: entry
-                    .get("ConfigFiles")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .into(),
-                working_dir: entry
-                    .get("WorkingDir")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .into(),
+                config_files,
+                working_dir,
             })
         })
         .collect()
 }
 /// 解析 Compose `ps --format json` 的服务数组，兼容 Docker Compose 字段缺失。
+#[allow(clippy::needless_collect)]
 fn parse_compose_services(value: &str) -> Vec<DockerComposeService> {
-    let parsed: serde_json::Value = serde_json::from_str(value).unwrap_or_default();
-    parsed
-        .as_array()
+    // 部分 Compose 版本输出单行数组，部分按行输出 JSON（每行一个容器）。
+    let entries: Vec<serde_json::Value> = match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(serde_json::Value::Array(items)) => items,
+        _ => value
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect(),
+    };
+    entries
         .into_iter()
-        .flatten()
         .filter_map(|entry| {
             Some(DockerComposeService {
                 name: entry.get("Name")?.as_str()?.into(),
@@ -2276,10 +2605,17 @@ fn split_sections(output: &str) -> std::collections::HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_compose_services, parse_events, parse_orphan_containers, parse_snapshot,
-        redact_compose_config, validate_build_context, validate_build_file, validate_image,
-        validate_name, validate_restart_policy, validate_token,
+        parse_compose_services, parse_container, parse_events, parse_orphan_containers,
+        parse_snapshot, redact_compose_config, validate_build_context, validate_build_file,
+        validate_image, validate_name, validate_restart_policy, validate_token,
     };
+
+    #[test]
+    fn parses_compose_project_from_ps_labels() {
+        let line = r#"{"ID":"3fd3f26a4ba5","CreatedAt":"2026-08-11 18:15:05 +0800 CST","Image":"local/jenkins-with-docker-pipeline:2.568.2","Labels":"com.docker.compose.config-hash=abc,com.docker.compose.project=jenkins,com.docker.compose.service=jenkins,org.opencontainers.image.vendor=Jenkins project","Names":"jenkins","State":"exited","Status":"Exited (143) 12 days ago","Ports":"","Networks":"jenkins_default"}"#;
+        let container = parse_container(line).expect("parses container line");
+        assert_eq!(container.compose_project.as_deref(), Some("jenkins"));
+    }
 
     #[test]
     fn parses_docker_json_sections() {

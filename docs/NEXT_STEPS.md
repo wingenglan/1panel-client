@@ -2,12 +2,9 @@
 
 本文记录 `1panel-client` 的后续迭代顺序，不把未实现的 1Panel 深度能力伪装成已完成。
 
-## 当前第一任务（下一位 Agent 可立即执行）
+## 当前状态
 
-1. 完成「网站证书批量策略」面板的视觉收尾：
-   - 在 `src/App.css` 补充 `certificate-renewal-panel`、`renewal-list`、`renewal-row`、`renewal-threshold`、`renewal-reason` 等样式，与现有 `website-card` 风格一致。
-   - 后端与 IPC 已就绪：`src-tauri/src/domain/website/mod.rs` 的 `certificate_renewal_plan`、`src-tauri/src/commands/mod.rs` 的 `get_certificate_renewal_plan`、`src/lib/api.ts` 的 `certificateRenewalPlan`、`src/features/website/WebsitePage.tsx` 的面板 JSX。
-   - 完成后按 `docs/HANDOFF_PROTOCOL.md` 跑一次全量门禁，并执行「大阶段视觉验收」。
+1. 「网站证书批量策略」已收尾完成（2026-08-28）：CSS 与空态/阈值行为、站点增删后按 key 失效重取已落地；已跑全量门禁并在测试服务器完成桌面应用真实运行验收（创建 HTTPS 受控站点→面板真实行→阈值 30/10 空态/365→UI 删除→SSH 清理→`openresty -t` 通过）与 1Panel 面板网站/证书页对照，详见 `docs/ACCEPTANCE.md`。下一位 Agent 可直接从下方「下一轮优先级」继续。
 
 ## 开发节奏
 
