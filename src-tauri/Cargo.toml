@@ -1,6 +1,6 @@
 [package]
 name = "onepanel-client"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-server desktop client inspired by 1Panel"
 authors = ["1Panel Client contributors"]
 edition = "2021"

@@ -1,5 +1,9 @@
-// Temporary CDP driver for WebView2 (deleted after use). No credentials in this file.
+// Local CDP diagnostics for WebView2. No credentials in this file.
+/* global fetch: readonly, WebSocket: readonly */
+import { Buffer } from "node:buffer";
+import console from "node:console";
 import { writeFileSync } from "node:fs";
+import process from "node:process";
 
 const cmd = process.argv[2];
 
@@ -12,6 +16,7 @@ async function getPageWs() {
 }
 
 class Cdp {
+  /** Correlates WebSocket responses with pending requests and propagates protocol errors. */
   constructor(ws) {
     this.ws = ws;
     this.id = 0;
@@ -21,7 +26,11 @@ class Cdp {
       if (msg.id && this.pending.has(msg.id)) {
         const { resolve, reject } = this.pending.get(msg.id);
         this.pending.delete(msg.id);
-        msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
+        if (msg.error) {
+          reject(new Error(JSON.stringify(msg.error)));
+        } else {
+          resolve(msg.result);
+        }
       }
     };
   }

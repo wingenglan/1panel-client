@@ -136,7 +136,7 @@ function tabTitle(path: string): string {
   return labels[segment] ?? "概览";
 }
 
-/** 渲染多服务器导航；路由变化时同步页签，关闭页签仅在点击事件中导航。 */
+/** 渲染多服务器导航和发行版本；路由变化时同步页签，关闭页签仅在点击事件中导航。 */
 export function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -304,7 +304,7 @@ export function AppShell() {
           </div>
         )}
         <main ref={workspaceRef} className="panel-workspace"><Outlet /></main>
-        <footer className="panel-footer"><span>1Panel Client 0.1.0 · GPL-3.0</span><span>多服务器 SSH 直连 · 凭据本地保护</span><span>{activeServer ? connectionStatusLabel(activeConnection.data?.status) : "节点总览"}</span></footer>
+        <footer className="panel-footer"><span>1Panel Client 0.1.1 · GPL-3.0</span><span>多服务器 SSH 直连 · 凭据本地保护</span><span>{activeServer ? connectionStatusLabel(activeConnection.data?.status) : "节点总览"}</span></footer>
       </div>
 
       <ServerDialog key={addOpen ? "add-open" : "add-closed"} open={addOpen} onOpenChange={setAddOpen} />
