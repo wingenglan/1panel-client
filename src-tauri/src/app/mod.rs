@@ -7,6 +7,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
+mod migrations;
+
 pub struct AppState {
     pub servers: ServerRepository,
     pub ssh: SshConnectionManager,
@@ -16,6 +18,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// 打开本地数据库、兼容历史迁移换行格式，并初始化仓库与后台调度器。
     pub async fn initialize(app: &AppHandle) -> AppResult<Self> {
         let app_data = app.path().app_data_dir().map_err(|error| {
             AppError::new(
@@ -35,10 +38,7 @@ impl AppState {
             .connect_with(options)
             .await
             .map_err(AppError::database)?;
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .map_err(AppError::database)?;
+        migrations::run(&pool).await.map_err(AppError::database)?;
         let local = LocalRepository::new(pool.clone());
         local.initialize_workspace().await?;
         let credentials: Arc<dyn CredentialStore> =

@@ -1,0 +1,2 @@
+# SQLx hashes migration bytes; keep them identical in Windows and Unix builds.
+src-tauri/migrations/*.sql text eol=lf

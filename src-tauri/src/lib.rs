@@ -41,14 +41,18 @@ fn initialize_logging(app: &tauri::AppHandle) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-/// 启动桌面应用并注册前端可调用的命令，包括受确认保护的 Compose 创建入口。
+/// 启动桌面应用并注册前端命令；初始化失败时将脱敏原因写入本地日志，便于诊断安装版退出。
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             initialize_logging(app.handle());
-            let state = tauri::async_runtime::block_on(app::AppState::initialize(app.handle()))?;
+            let state = tauri::async_runtime::block_on(app::AppState::initialize(app.handle()))
+                .inspect_err(|error| {
+                    tracing::error!(code = error.code, details = ?error.details, "应用初始化失败");
+                })?;
+            tracing::info!("本地数据库及应用状态初始化完成");
             app.manage(state);
             Ok(())
         })
